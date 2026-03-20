@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { lerpAngle } from '../core/hex';
 import type { ShipBlueprint, ShipStats } from '../core/types';
 import { applyCrewModifiers, DEFAULT_CREW_ALLOCATION } from '../game/crew';
+import { ENCOUNTER_PRESETS, getEncounterPreset, type EncounterWave } from '../game/encounters';
 import { buildShipGroup, computeBlueprintRadius } from '../rendering/shipFactory';
 import { cloneBlueprint, computeShipStats, createExampleBlueprint } from '../state/shipBlueprint';
 import { buildWeaponLoadout, type WeaponProfile } from '../game/weapons';
@@ -20,6 +21,7 @@ interface FlightSceneOptions {
   mount: HTMLElement;
   uiRoot: HTMLElement;
   blueprint: ShipBlueprint;
+  encounterId: string;
   onBack: (blueprint: ShipBlueprint) => void;
 }
 
@@ -56,20 +58,6 @@ interface Projectile {
   active: boolean;
 }
 
-interface WaveConfig {
-  name: string;
-  enemies: EnemyConfig[];
-}
-
-interface EnemyConfig {
-  id: string;
-  blueprint: ShipBlueprint;
-  position: THREE.Vector3;
-  rotation: number;
-  preferredRange: number;
-  fireJitter: number;
-}
-
 const PROJECTILE_POOL_SIZE = 96;
 const ARENA_RADIUS = 18;
 const MAX_WORLD_RADIUS = 40;
@@ -89,7 +77,7 @@ export class FlightScene {
   private readonly ships: RuntimeShip[] = [];
   private readonly projectiles: Projectile[] = [];
   private readonly keys = new Set<string>();
-  private readonly waves: WaveConfig[];
+  private readonly waves: EncounterWave[];
 
   private player!: RuntimeShip;
   private fireHeld = false;
@@ -110,11 +98,11 @@ export class FlightScene {
     if (event.button === 0) this.fireHeld = false;
   };
 
-  constructor({ renderer, uiRoot, blueprint, onBack }: FlightSceneOptions) {
+  constructor({ renderer, uiRoot, blueprint, encounterId, onBack }: FlightSceneOptions) {
     this.renderer = renderer;
     this.uiRoot = uiRoot;
     this.onBack = onBack;
-    this.waves = createWaveConfigs();
+    this.waves = getEncounterPreset(encounterId)?.waves ?? ENCOUNTER_PRESETS[0]?.waves ?? [];
 
     this.camera.position.set(0, 20, 0.001);
     this.camera.up.set(0, 0, -1);
@@ -647,7 +635,7 @@ function getProjectileColor(team: 'player' | 'enemy', archetype: WeaponProfile['
   return team === 'player' ? '#fde68a' : '#fecaca';
 }
 
-function createWaveConfigs(): WaveConfig[] {
+function createWaveConfigs(): EncounterWave[] {
   const waveOneEnemy = createExampleBlueprint();
   waveOneEnemy.name = 'Red Aggressor';
   waveOneEnemy.modules = waveOneEnemy.modules.map((module, index) =>

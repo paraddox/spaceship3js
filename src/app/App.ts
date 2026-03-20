@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { EditorScene } from '../scenes/EditorScene';
 import { FlightScene } from '../scenes/FlightScene';
 import type { ShipBlueprint } from '../core/types';
+import { ENCOUNTER_PRESETS, getEncounterPreset } from '../game/encounters';
 import { cloneBlueprint, createExampleBlueprint, parseBlueprint } from '../state/shipBlueprint';
 
 interface ActiveScene {
@@ -56,7 +57,9 @@ export class App {
   }
 
   private loadEncounterId(): string {
-    return window.localStorage.getItem(ENCOUNTER_KEY) ?? 'gauntlet';
+    const saved = window.localStorage.getItem(ENCOUNTER_KEY);
+    if (saved && getEncounterPreset(saved)) return saved;
+    return ENCOUNTER_PRESETS[0]?.id ?? 'gauntlet';
   }
 
   private persistEncounterId(): void {
@@ -70,13 +73,20 @@ export class App {
       mount: this.rendererHost,
       uiRoot: this.uiRoot,
       blueprint: cloneBlueprint(this.blueprint),
+      selectedEncounterId: this.selectedEncounterId,
       onBlueprintChange: (blueprint) => {
         this.blueprint = cloneBlueprint(blueprint);
         this.persistBlueprint();
       },
-      onLaunch: (blueprint) => {
+      onEncounterChange: (encounterId) => {
+        this.selectedEncounterId = encounterId;
+        this.persistEncounterId();
+      },
+      onLaunch: (blueprint, encounterId) => {
         this.blueprint = cloneBlueprint(blueprint);
+        this.selectedEncounterId = encounterId;
         this.persistBlueprint();
+        this.persistEncounterId();
         this.showFlight();
       },
     });
@@ -90,6 +100,7 @@ export class App {
       mount: this.rendererHost,
       uiRoot: this.uiRoot,
       blueprint: cloneBlueprint(this.blueprint),
+      encounterId: this.selectedEncounterId,
       onBack: (blueprint) => {
         this.blueprint = cloneBlueprint(blueprint);
         this.persistBlueprint();

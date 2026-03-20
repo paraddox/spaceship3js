@@ -25,8 +25,10 @@ interface EditorSceneOptions {
   mount: HTMLElement;
   uiRoot: HTMLElement;
   blueprint: ShipBlueprint;
+  selectedEncounterId: string;
   onBlueprintChange: (blueprint: ShipBlueprint) => void;
-  onLaunch: (blueprint: ShipBlueprint) => void;
+  onEncounterChange: (encounterId: string) => void;
+  onLaunch: (blueprint: ShipBlueprint, encounterId: string) => void;
 }
 
 export class EditorScene {
@@ -34,7 +36,8 @@ export class EditorScene {
   private readonly mount: HTMLElement;
   private readonly uiRoot: HTMLElement;
   private readonly onBlueprintChange: (blueprint: ShipBlueprint) => void;
-  private readonly onLaunch: (blueprint: ShipBlueprint) => void;
+  private readonly onEncounterChange: (encounterId: string) => void;
+  private readonly onLaunch: (blueprint: ShipBlueprint, encounterId: string) => void;
 
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.OrthographicCamera(-12, 12, 12, -12, 0.1, 100);
@@ -47,6 +50,7 @@ export class EditorScene {
   private readonly hoverRing: THREE.Mesh;
 
   private blueprint: ShipBlueprint;
+  private selectedEncounterId: string;
   private selectedModuleId = 'core:bridge_scout';
   private previewRotation = 0;
   private hoveredHex: HexCoord | null = null;
@@ -97,12 +101,14 @@ export class EditorScene {
     }
   };
 
-  constructor({ renderer, mount, uiRoot, blueprint, onBlueprintChange, onLaunch }: EditorSceneOptions) {
+  constructor({ renderer, mount, uiRoot, blueprint, selectedEncounterId, onBlueprintChange, onEncounterChange, onLaunch }: EditorSceneOptions) {
     this.renderer = renderer;
     this.mount = mount;
     this.uiRoot = uiRoot;
     this.blueprint = cloneBlueprint(blueprint);
+    this.selectedEncounterId = selectedEncounterId;
     this.onBlueprintChange = onBlueprintChange;
+    this.onEncounterChange = onEncounterChange;
     this.onLaunch = onLaunch;
 
     this.camera.position.set(0, 18, 0.001);
@@ -206,6 +212,10 @@ export class EditorScene {
           <button data-action="export-json">Copy JSON</button>
           <button data-action="import-json">Import JSON</button>
         </div>
+        <h2>Encounter</h2>
+        <div class="encounter-grid">
+          ${ENCOUNTER_PRESETS.map((preset) => `<button class="encounter-button" data-encounter="${preset.id}">${preset.displayName}</button>`).join('')}
+        </div>
         <h2>Module Palette</h2>
         <div class="module-grid">
           ${PALETTE_GROUPS.flat().map((id) => {
@@ -233,6 +243,16 @@ export class EditorScene {
     this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-module]').forEach((button) => {
       button.addEventListener('click', () => {
         this.selectedModuleId = button.dataset.module ?? this.selectedModuleId;
+        this.refreshInfo();
+      });
+    });
+
+    this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-encounter]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const encounterId = button.dataset.encounter;
+        if (!encounterId) return;
+        this.selectedEncounterId = encounterId;
+        this.onEncounterChange(encounterId);
         this.refreshInfo();
       });
     });
@@ -268,7 +288,7 @@ export class EditorScene {
             this.refreshInfo();
             return;
           }
-          this.onLaunch(cloneBlueprint(this.blueprint));
+          this.onLaunch(cloneBlueprint(this.blueprint), this.selectedEncounterId);
           return;
         }
         this.onBlueprintChange(cloneBlueprint(this.blueprint));
@@ -372,6 +392,9 @@ export class EditorScene {
     }
     this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-module]').forEach((button) => {
       button.classList.toggle('active', button.dataset.module === this.selectedModuleId);
+    });
+    this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-encounter]').forEach((button) => {
+      button.classList.toggle('active', button.dataset.encounter === this.selectedEncounterId);
     });
     const launchButton = this.uiRoot.querySelector<HTMLButtonElement>('[data-action="launch"]');
     if (launchButton) {
