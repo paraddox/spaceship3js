@@ -6,6 +6,7 @@ import { ENCOUNTER_PRESETS, getEncounterPreset, type EncounterWave } from '../ga
 import { buildShipGroup, computeBlueprintRadius } from '../rendering/shipFactory';
 import { cloneBlueprint, computeShipStats, createExampleBlueprint } from '../state/shipBlueprint';
 import { buildWeaponLoadout, type WeaponProfile } from '../game/weapons';
+import { createEncounterReward, type EncounterReward } from '../game/progression';
 import {
   advanceEncounterState,
   computeCoolingPerSecond,
@@ -22,6 +23,7 @@ interface FlightSceneOptions {
   uiRoot: HTMLElement;
   blueprint: ShipBlueprint;
   encounterId: string;
+  onReward: (encounterId: string, reward: EncounterReward) => void;
   onBack: (blueprint: ShipBlueprint) => void;
 }
 
@@ -66,6 +68,7 @@ const WAVE_RESPAWN_DELAY = 1.6;
 export class FlightScene {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly uiRoot: HTMLElement;
+  private readonly onReward: (encounterId: string, reward: EncounterReward) => void;
   private readonly onBack: (blueprint: ShipBlueprint) => void;
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.OrthographicCamera(-14, 14, 14, -14, 0.1, 120);
@@ -86,6 +89,8 @@ export class FlightScene {
   private encounterOutcome: 'continue' | 'victory' | 'defeat' = 'continue';
   private waveDelay = 0;
   private waveAnnouncement = 'Wave 1 engaged';
+  private hasGrantedReward = false;
+  private encounterId: string;
 
   private readonly onKeyDown = (event: KeyboardEvent) => this.keys.add(event.code);
   private readonly onKeyUp = (event: KeyboardEvent) => this.keys.delete(event.code);
@@ -98,10 +103,12 @@ export class FlightScene {
     if (event.button === 0) this.fireHeld = false;
   };
 
-  constructor({ renderer, uiRoot, blueprint, encounterId, onBack }: FlightSceneOptions) {
+  constructor({ renderer, uiRoot, blueprint, encounterId, onReward, onBack }: FlightSceneOptions) {
     this.renderer = renderer;
     this.uiRoot = uiRoot;
+    this.onReward = onReward;
     this.onBack = onBack;
+    this.encounterId = encounterId;
     this.waves = getEncounterPreset(encounterId)?.waves ?? ENCOUNTER_PRESETS[0]?.waves ?? [];
 
     this.camera.position.set(0, 20, 0.001);
@@ -266,6 +273,7 @@ export class FlightScene {
     this.encounterOutcome = 'continue';
     this.waveDelay = 0;
     this.waveAnnouncement = 'Wave 1 engaged';
+    this.hasGrantedReward = false;
 
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
@@ -558,6 +566,11 @@ export class FlightScene {
 
     if (progress.outcome === 'victory') {
       this.waveAnnouncement = 'All waves cleared';
+      if (!this.hasGrantedReward) {
+        const totalEnemies = this.waves.reduce((sum, wave) => sum + wave.enemies.length, 0);
+        this.onReward(this.encounterId, createEncounterReward(this.waves.length, totalEnemies, true));
+        this.hasGrantedReward = true;
+      }
     }
     if (progress.outcome === 'defeat') {
       this.waveAnnouncement = 'Player ship disabled';

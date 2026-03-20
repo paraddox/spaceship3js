@@ -34,6 +34,22 @@ button { cursor: pointer; }
   pointer-events: auto;
 }
 
+.progression-summary {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.progression-pill {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(15, 118, 110, 0.18);
+  border: 1px solid rgba(45, 212, 191, 0.18);
+}
+
 .top-left { top: 16px; left: 16px; }
 .top-right { top: 16px; right: 16px; }
 .bottom-left { left: 16px; bottom: 16px; }

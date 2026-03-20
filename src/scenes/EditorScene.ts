@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { HEX_HEIGHT, HEX_SIZE, generateHexRing, hexKey, hexToWorld, normalizeRotation, worldToHex } from '../core/hex';
 import type { CrewAllocation, HexCoord, ShipBlueprint } from '../core/types';
+import type { ProgressionState } from '../game/progression';
 import { DEFAULT_CREW_ALLOCATION, applyCrewModifiers } from '../game/crew';
 import { ENCOUNTER_PRESETS } from '../game/encounters';
 import type { HangarEntry } from '../game/hangar';
@@ -28,6 +29,7 @@ interface EditorSceneOptions {
   blueprint: ShipBlueprint;
   selectedEncounterId: string;
   hangarEntries: HangarEntry[];
+  progression: ProgressionState;
   onBlueprintChange: (blueprint: ShipBlueprint) => void;
   onEncounterChange: (encounterId: string) => void;
   onSaveToHangar: (name: string, blueprint: ShipBlueprint) => void;
@@ -59,6 +61,7 @@ export class EditorScene {
 
   private blueprint: ShipBlueprint;
   private hangarEntries: HangarEntry[];
+  private progression: ProgressionState;
   private selectedEncounterId: string;
   private selectedModuleId = 'core:bridge_scout';
   private previewRotation = 0;
@@ -110,12 +113,13 @@ export class EditorScene {
     }
   };
 
-  constructor({ renderer, mount, uiRoot, blueprint, selectedEncounterId, hangarEntries, onBlueprintChange, onEncounterChange, onSaveToHangar, onLoadFromHangar, onDeleteFromHangar, onLaunch }: EditorSceneOptions) {
+  constructor({ renderer, mount, uiRoot, blueprint, selectedEncounterId, hangarEntries, progression, onBlueprintChange, onEncounterChange, onSaveToHangar, onLoadFromHangar, onDeleteFromHangar, onLaunch }: EditorSceneOptions) {
     this.renderer = renderer;
     this.mount = mount;
     this.uiRoot = uiRoot;
     this.blueprint = cloneBlueprint(blueprint);
     this.hangarEntries = hangarEntries;
+    this.progression = progression;
     this.selectedEncounterId = selectedEncounterId;
     this.onBlueprintChange = onBlueprintChange;
     this.onEncounterChange = onEncounterChange;
@@ -211,6 +215,7 @@ export class EditorScene {
       <div class="overlay top-left panel editor-panel">
         <h1>Spachip3JS</h1>
         <p class="muted">Godot spaceship plan translated into a browser-friendly editor + flight sandbox.</p>
+        <div id="progression-summary" class="progression-summary"></div>
         <div id="editor-stats" class="stats-grid"></div>
         <h2>Crew Assignments</h2>
         <div id="crew-grid" class="crew-grid"></div>
@@ -369,11 +374,21 @@ export class EditorScene {
     const selected = getModuleDefinition(this.selectedModuleId);
     const totalCrew = Object.values(this.blueprint.crew).reduce((sum, value) => sum + value, 0);
     const validation = getBlueprintValidation(this.blueprint);
+    const progressionEl = this.uiRoot.querySelector('#progression-summary');
     const statsEl = this.uiRoot.querySelector('#editor-stats');
     const previewEl = this.uiRoot.querySelector('#editor-preview');
     const validationEl = this.uiRoot.querySelector('#editor-validation');
     const crewEl = this.uiRoot.querySelector('#crew-grid');
     const hangarEl = this.uiRoot.querySelector('#hangar-grid');
+    if (progressionEl) {
+      const bestScore = this.progression.bestEncounterScores[this.selectedEncounterId] ?? 0;
+      const completed = this.progression.completedEncounterIds.includes(this.selectedEncounterId);
+      progressionEl.innerHTML = `
+        <div class="progression-pill"><span>Credits</span><strong>${this.progression.credits}</strong></div>
+        <div class="progression-pill"><span>Completed Encounters</span><strong>${this.progression.completedEncounterIds.length}</strong></div>
+        <div class="progression-pill"><span>${completed ? 'Best Score' : 'Target Encounter'}</span><strong>${completed ? bestScore : this.selectedEncounterId}</strong></div>
+      `;
+    }
     if (statsEl) {
       statsEl.innerHTML = [
         ['Modules', String(this.blueprint.modules.length)],

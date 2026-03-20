@@ -9,6 +9,12 @@ import {
   sortHangarEntries,
   type HangarEntry,
 } from '../game/hangar';
+import {
+  DEFAULT_PROGRESSION_STATE,
+  applyEncounterReward,
+  type EncounterReward,
+  type ProgressionState,
+} from '../game/progression';
 import { cloneBlueprint, createExampleBlueprint, parseBlueprint } from '../state/shipBlueprint';
 
 interface ActiveScene {
@@ -20,6 +26,7 @@ interface ActiveScene {
 const STORAGE_KEY = 'spachip3js.blueprint';
 const ENCOUNTER_KEY = 'spachip3js.encounter';
 const HANGAR_KEY = 'spachip3js.hangar';
+const PROGRESSION_KEY = 'spachip3js.progression';
 
 export class App {
   private readonly root: HTMLElement;
@@ -31,6 +38,7 @@ export class App {
   private blueprint: ShipBlueprint;
   private selectedEncounterId = 'gauntlet';
   private hangarEntries: HangarEntry[] = [];
+  private progression: ProgressionState = DEFAULT_PROGRESSION_STATE;
   private activeScene: ActiveScene | null = null;
 
   constructor(root: HTMLElement) {
@@ -48,6 +56,7 @@ export class App {
     this.blueprint = this.loadBlueprint();
     this.selectedEncounterId = this.loadEncounterId();
     this.hangarEntries = this.loadHangarEntries();
+    this.progression = this.loadProgression();
     window.addEventListener('resize', this.handleResize);
     this.handleResize();
     this.showEditor();
@@ -97,6 +106,27 @@ export class App {
     window.localStorage.setItem(HANGAR_KEY, JSON.stringify(this.hangarEntries));
   }
 
+  private loadProgression(): ProgressionState {
+    const saved = window.localStorage.getItem(PROGRESSION_KEY);
+    if (!saved) return DEFAULT_PROGRESSION_STATE;
+    try {
+      const data = JSON.parse(saved) as Partial<ProgressionState>;
+      return {
+        credits: Number(data.credits ?? 0),
+        completedEncounterIds: Array.isArray(data.completedEncounterIds) ? data.completedEncounterIds.map(String) : [],
+        bestEncounterScores: typeof data.bestEncounterScores === 'object' && data.bestEncounterScores
+          ? Object.fromEntries(Object.entries(data.bestEncounterScores).map(([key, value]) => [key, Number(value)]))
+          : {},
+      };
+    } catch {
+      return DEFAULT_PROGRESSION_STATE;
+    }
+  }
+
+  private persistProgression(): void {
+    window.localStorage.setItem(PROGRESSION_KEY, JSON.stringify(this.progression));
+  }
+
   private showEditor(): void {
     this.activeScene?.dispose();
     this.activeScene = new EditorScene({
@@ -106,6 +136,7 @@ export class App {
       blueprint: cloneBlueprint(this.blueprint),
       selectedEncounterId: this.selectedEncounterId,
       hangarEntries: this.hangarEntries,
+      progression: this.progression,
       onBlueprintChange: (blueprint) => {
         this.blueprint = cloneBlueprint(blueprint);
         this.persistBlueprint();
@@ -150,6 +181,10 @@ export class App {
       uiRoot: this.uiRoot,
       blueprint: cloneBlueprint(this.blueprint),
       encounterId: this.selectedEncounterId,
+      onReward: (encounterId, reward) => {
+        this.progression = applyEncounterReward(this.progression, encounterId, reward);
+        this.persistProgression();
+      },
       onBack: (blueprint) => {
         this.blueprint = cloneBlueprint(blueprint);
         this.persistBlueprint();
