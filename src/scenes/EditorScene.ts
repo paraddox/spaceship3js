@@ -3,6 +3,7 @@ import { HEX_HEIGHT, HEX_SIZE, generateHexRing, hexKey, hexToWorld, normalizeRot
 import type { CrewAllocation, HexCoord, ShipBlueprint } from '../core/types';
 import { DEFAULT_CREW_ALLOCATION, applyCrewModifiers } from '../game/crew';
 import { ENCOUNTER_PRESETS } from '../game/encounters';
+import type { HangarEntry } from '../game/hangar';
 import { PALETTE_GROUPS } from '../data/moduleCatalog';
 import { buildPreviewGroup, buildShipGroup } from '../rendering/shipFactory';
 import {
@@ -26,8 +27,12 @@ interface EditorSceneOptions {
   uiRoot: HTMLElement;
   blueprint: ShipBlueprint;
   selectedEncounterId: string;
+  hangarEntries: HangarEntry[];
   onBlueprintChange: (blueprint: ShipBlueprint) => void;
   onEncounterChange: (encounterId: string) => void;
+  onSaveToHangar: (name: string, blueprint: ShipBlueprint) => void;
+  onLoadFromHangar: (entryId: string) => void;
+  onDeleteFromHangar: (entryId: string) => void;
   onLaunch: (blueprint: ShipBlueprint, encounterId: string) => void;
 }
 
@@ -37,6 +42,9 @@ export class EditorScene {
   private readonly uiRoot: HTMLElement;
   private readonly onBlueprintChange: (blueprint: ShipBlueprint) => void;
   private readonly onEncounterChange: (encounterId: string) => void;
+  private readonly onSaveToHangar: (name: string, blueprint: ShipBlueprint) => void;
+  private readonly onLoadFromHangar: (entryId: string) => void;
+  private readonly onDeleteFromHangar: (entryId: string) => void;
   private readonly onLaunch: (blueprint: ShipBlueprint, encounterId: string) => void;
 
   private readonly scene = new THREE.Scene();
@@ -50,6 +58,7 @@ export class EditorScene {
   private readonly hoverRing: THREE.Mesh;
 
   private blueprint: ShipBlueprint;
+  private hangarEntries: HangarEntry[];
   private selectedEncounterId: string;
   private selectedModuleId = 'core:bridge_scout';
   private previewRotation = 0;
@@ -101,14 +110,18 @@ export class EditorScene {
     }
   };
 
-  constructor({ renderer, mount, uiRoot, blueprint, selectedEncounterId, onBlueprintChange, onEncounterChange, onLaunch }: EditorSceneOptions) {
+  constructor({ renderer, mount, uiRoot, blueprint, selectedEncounterId, hangarEntries, onBlueprintChange, onEncounterChange, onSaveToHangar, onLoadFromHangar, onDeleteFromHangar, onLaunch }: EditorSceneOptions) {
     this.renderer = renderer;
     this.mount = mount;
     this.uiRoot = uiRoot;
     this.blueprint = cloneBlueprint(blueprint);
+    this.hangarEntries = hangarEntries;
     this.selectedEncounterId = selectedEncounterId;
     this.onBlueprintChange = onBlueprintChange;
     this.onEncounterChange = onEncounterChange;
+    this.onSaveToHangar = onSaveToHangar;
+    this.onLoadFromHangar = onLoadFromHangar;
+    this.onDeleteFromHangar = onDeleteFromHangar;
     this.onLaunch = onLaunch;
 
     this.camera.position.set(0, 18, 0.001);
@@ -216,6 +229,11 @@ export class EditorScene {
         <div class="encounter-grid">
           ${ENCOUNTER_PRESETS.map((preset) => `<button class="encounter-button" data-encounter="${preset.id}">${preset.displayName}</button>`).join('')}
         </div>
+        <h2>Hangar</h2>
+        <div class="toolbar-row">
+          <button data-action="save-hangar">Save Current Ship</button>
+        </div>
+        <div id="hangar-grid" class="hangar-grid"></div>
         <h2>Module Palette</h2>
         <div class="module-grid">
           ${PALETTE_GROUPS.flat().map((id) => {
@@ -271,6 +289,14 @@ export class EditorScene {
           const text = serializeBlueprint(this.blueprint);
           await navigator.clipboard?.writeText(text);
           window.alert('Blueprint copied to clipboard.');
+        }
+        if (action === 'save-hangar') {
+          const defaultName = `${this.blueprint.name} ${new Date().toLocaleTimeString()}`;
+          const name = window.prompt('Save ship to hangar as:', defaultName);
+          if (name) {
+            this.onSaveToHangar(name, cloneBlueprint(this.blueprint));
+          }
+          return;
         }
         if (action === 'import-json') {
           const input = window.prompt('Paste a ship blueprint JSON blob');
@@ -347,6 +373,7 @@ export class EditorScene {
     const previewEl = this.uiRoot.querySelector('#editor-preview');
     const validationEl = this.uiRoot.querySelector('#editor-validation');
     const crewEl = this.uiRoot.querySelector('#crew-grid');
+    const hangarEl = this.uiRoot.querySelector('#hangar-grid');
     if (statsEl) {
       statsEl.innerHTML = [
         ['Modules', String(this.blueprint.modules.length)],
@@ -389,6 +416,31 @@ export class EditorScene {
       validationEl.innerHTML = validation.valid
         ? '<span class="success">Launch-ready configuration.</span>'
         : `<span class="warning">${validation.issues.join(' ')}</span>`;
+    }
+    if (hangarEl) {
+      hangarEl.innerHTML = this.hangarEntries.length === 0
+        ? '<p class="muted">No saved ships yet.</p>'
+        : this.hangarEntries.map((entry) => `
+            <div class="hangar-row">
+              <div>
+                <strong>${entry.name}</strong>
+                <div class="muted">${entry.blueprint.modules.length} modules · ${new Date(entry.updatedAt).toLocaleString()}</div>
+              </div>
+              <div class="crew-controls">
+                <button data-hangar-action="load" data-hangar-id="${entry.id}">Load</button>
+                <button data-hangar-action="delete" data-hangar-id="${entry.id}">Delete</button>
+              </div>
+            </div>
+          `).join('');
+      this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-hangar-action]').forEach((button) => {
+        button.onclick = () => {
+          const id = button.dataset.hangarId;
+          const action = button.dataset.hangarAction;
+          if (!id || !action) return;
+          if (action === 'load') this.onLoadFromHangar(id);
+          if (action === 'delete') this.onDeleteFromHangar(id);
+        };
+      });
     }
     this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-module]').forEach((button) => {
       button.classList.toggle('active', button.dataset.module === this.selectedModuleId);

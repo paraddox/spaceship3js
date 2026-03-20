@@ -3,6 +3,12 @@ import { EditorScene } from '../scenes/EditorScene';
 import { FlightScene } from '../scenes/FlightScene';
 import type { ShipBlueprint } from '../core/types';
 import { ENCOUNTER_PRESETS, getEncounterPreset } from '../game/encounters';
+import {
+  removeBlueprintFromHangar,
+  saveBlueprintToHangar,
+  sortHangarEntries,
+  type HangarEntry,
+} from '../game/hangar';
 import { cloneBlueprint, createExampleBlueprint, parseBlueprint } from '../state/shipBlueprint';
 
 interface ActiveScene {
@@ -13,6 +19,7 @@ interface ActiveScene {
 
 const STORAGE_KEY = 'spachip3js.blueprint';
 const ENCOUNTER_KEY = 'spachip3js.encounter';
+const HANGAR_KEY = 'spachip3js.hangar';
 
 export class App {
   private readonly root: HTMLElement;
@@ -23,6 +30,7 @@ export class App {
 
   private blueprint: ShipBlueprint;
   private selectedEncounterId = 'gauntlet';
+  private hangarEntries: HangarEntry[] = [];
   private activeScene: ActiveScene | null = null;
 
   constructor(root: HTMLElement) {
@@ -39,6 +47,7 @@ export class App {
 
     this.blueprint = this.loadBlueprint();
     this.selectedEncounterId = this.loadEncounterId();
+    this.hangarEntries = this.loadHangarEntries();
     window.addEventListener('resize', this.handleResize);
     this.handleResize();
     this.showEditor();
@@ -66,6 +75,28 @@ export class App {
     window.localStorage.setItem(ENCOUNTER_KEY, this.selectedEncounterId);
   }
 
+  private loadHangarEntries(): HangarEntry[] {
+    const saved = window.localStorage.getItem(HANGAR_KEY);
+    if (!saved) return [];
+    try {
+      const data = JSON.parse(saved) as Array<{ id: string; name: string; blueprint: unknown; updatedAt: string }>;
+      const parsed = data
+        .map((entry) => {
+          const blueprint = parseBlueprint(JSON.stringify(entry.blueprint));
+          if (!blueprint) return null;
+          return { id: entry.id, name: entry.name, blueprint, updatedAt: entry.updatedAt } satisfies HangarEntry;
+        })
+        .filter((entry): entry is HangarEntry => entry !== null);
+      return sortHangarEntries(parsed);
+    } catch {
+      return [];
+    }
+  }
+
+  private persistHangarEntries(): void {
+    window.localStorage.setItem(HANGAR_KEY, JSON.stringify(this.hangarEntries));
+  }
+
   private showEditor(): void {
     this.activeScene?.dispose();
     this.activeScene = new EditorScene({
@@ -74,6 +105,7 @@ export class App {
       uiRoot: this.uiRoot,
       blueprint: cloneBlueprint(this.blueprint),
       selectedEncounterId: this.selectedEncounterId,
+      hangarEntries: this.hangarEntries,
       onBlueprintChange: (blueprint) => {
         this.blueprint = cloneBlueprint(blueprint);
         this.persistBlueprint();
@@ -81,6 +113,23 @@ export class App {
       onEncounterChange: (encounterId) => {
         this.selectedEncounterId = encounterId;
         this.persistEncounterId();
+      },
+      onSaveToHangar: (name, blueprint) => {
+        this.hangarEntries = saveBlueprintToHangar(this.hangarEntries, name, blueprint);
+        this.persistHangarEntries();
+        this.showEditor();
+      },
+      onLoadFromHangar: (entryId) => {
+        const entry = this.hangarEntries.find((candidate) => candidate.id === entryId);
+        if (!entry) return;
+        this.blueprint = cloneBlueprint(entry.blueprint);
+        this.persistBlueprint();
+        this.showEditor();
+      },
+      onDeleteFromHangar: (entryId) => {
+        this.hangarEntries = removeBlueprintFromHangar(this.hangarEntries, entryId);
+        this.persistHangarEntries();
+        this.showEditor();
       },
       onLaunch: (blueprint, encounterId) => {
         this.blueprint = cloneBlueprint(blueprint);

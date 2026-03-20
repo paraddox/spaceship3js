@@ -79,13 +79,15 @@ button.primary:hover { filter: brightness(1.08); }
   gap: 8px;
 }
 
-.crew-grid {
+.crew-grid,
+.hangar-grid {
   display: grid;
   gap: 8px;
   margin: 10px 0 12px;
 }
 
-.crew-row {
+.crew-row,
+.hangar-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
