@@ -550,14 +550,19 @@ export class FlightScene {
   private spawnDronesForShip(ship: RuntimeShip): void {
     const profiles = buildDroneProfiles(ship.blueprint);
     const instances = createDroneInstances(profiles, { x: ship.position.x, z: ship.position.z }, ship.team);
+    const droneTexture = new THREE.TextureLoader().load('/generated/drone-support-topdown.jpg');
+    droneTexture.colorSpace = THREE.SRGBColorSpace;
     for (const instance of instances) {
-      const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(0.18, 10, 10),
-        new THREE.MeshBasicMaterial({ color: ship.team === 'player' ? '#c084fc' : '#f472b6' }),
-      );
-      mesh.position.set(ship.position.x, 0.35, ship.position.z);
+      const material = new THREE.SpriteMaterial({
+        map: droneTexture,
+        color: ship.team === 'player' ? '#ffffff' : '#ffb3dc',
+        transparent: true,
+      });
+      const mesh = new THREE.Sprite(material);
+      mesh.scale.set(1.35, 1.35, 1.35);
+      mesh.position.set(ship.position.x, 0.45, ship.position.z);
       this.scene.add(mesh);
-      this.drones.push({ ownerId: ship.id, mesh, state: instance });
+      this.drones.push({ ownerId: ship.id, mesh: mesh as unknown as THREE.Mesh, state: instance });
     }
   }
 
