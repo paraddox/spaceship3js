@@ -150,6 +150,20 @@ export const MODULE_CATALOG: ModuleDefinition[] = [
     color: '#ff9966',
     stats: { damage: 60, damageType: 'explosive', fireRate: 0.3, range: 800, heatPerShot: 3, projectileSpeed: 11 },
   },
+  {
+    id: 'core:laser_beam_light',
+    displayName: 'Beam Laser',
+    description: 'Short-range continuous beam weapon.',
+    category: 'weapon',
+    footprint: [{ q: 0, r: 0 }],
+    mass: 4,
+    maxHp: 70,
+    powerConsumption: 12,
+    heatCapacity: 40,
+    heatDissipation: 0.12,
+    color: '#5eead4',
+    stats: { damagePerSecond: 24, damageType: 'energy', beamRange: 320, heatPerSecond: 9 },
+  },
 ];
 
 export const MODULES_BY_ID = Object.fromEntries(MODULE_CATALOG.map((module) => [module.id, module]));
@@ -159,7 +173,7 @@ export const PALETTE_GROUPS = [
   ['core:hull_1x1', 'core:hull_2x1'],
   ['core:reactor_small', 'core:reactor_medium'],
   ['core:thruster_small', 'core:thruster_lateral'],
-  ['core:laser_light', 'core:cannon_kinetic', 'core:missile_launcher'],
+  ['core:laser_light', 'core:cannon_kinetic', 'core:missile_launcher', 'core:laser_beam_light'],
 ];
 
 export const EXAMPLE_SCOUT_BLUEPRINT: ShipBlueprint = {

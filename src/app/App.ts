@@ -11,6 +11,7 @@ interface ActiveScene {
 }
 
 const STORAGE_KEY = 'spachip3js.blueprint';
+const ENCOUNTER_KEY = 'spachip3js.encounter';
 
 export class App {
   private readonly root: HTMLElement;
@@ -20,6 +21,7 @@ export class App {
   private readonly clock = new THREE.Clock();
 
   private blueprint: ShipBlueprint;
+  private selectedEncounterId = 'gauntlet';
   private activeScene: ActiveScene | null = null;
 
   constructor(root: HTMLElement) {
@@ -35,6 +37,7 @@ export class App {
     this.root.append(this.rendererHost, this.uiRoot);
 
     this.blueprint = this.loadBlueprint();
+    this.selectedEncounterId = this.loadEncounterId();
     window.addEventListener('resize', this.handleResize);
     this.handleResize();
     this.showEditor();
@@ -50,6 +53,14 @@ export class App {
 
   private persistBlueprint(): void {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(this.blueprint));
+  }
+
+  private loadEncounterId(): string {
+    return window.localStorage.getItem(ENCOUNTER_KEY) ?? 'gauntlet';
+  }
+
+  private persistEncounterId(): void {
+    window.localStorage.setItem(ENCOUNTER_KEY, this.selectedEncounterId);
   }
 
   private showEditor(): void {

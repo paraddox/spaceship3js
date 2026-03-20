@@ -3,6 +3,12 @@ import { addHex, getNeighbors, hexKey, normalizeRotation, transformFootprint } f
 import { DEFAULT_CREW_ALLOCATION, clampCrewAllocation } from '../game/crew';
 import { EXAMPLE_SCOUT_BLUEPRINT, MODULES_BY_ID } from '../data/moduleCatalog';
 
+export interface BlueprintValidation {
+  valid: boolean;
+  issues: string[];
+  disconnectedModuleIds: string[];
+}
+
 function nextInstanceId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `m-${Math.random().toString(36).slice(2)}`;
 }
@@ -117,6 +123,43 @@ export function getModuleAtHex(blueprint: ShipBlueprint, hex: HexCoord): PlacedM
   return blueprint.modules.find((module) => getWorldFootprint(module).some((cell) => hexKey(cell) == key)) ?? null;
 }
 
+export function getBlueprintValidation(blueprint: ShipBlueprint): BlueprintValidation {
+  const issues: string[] = [];
+  const bridges = blueprint.modules.filter((module) => getModuleDefinition(module.definitionId).category === 'bridge');
+  const stats = computeShipStats(blueprint);
+
+  if (bridges.length === 0) {
+    issues.push('Ship requires a bridge module.');
+  }
+
+  const disconnectedModuleIds = getDisconnectedModuleIds(blueprint, bridges);
+  if (disconnectedModuleIds.length > 0) {
+    issues.push('All modules must remain connected to the bridge.');
+  }
+
+  if (stats.powerOutput <= 0 || stats.powerOutput < stats.powerDemand) {
+    issues.push('Ship needs enough power output before launch.');
+  }
+
+  if (stats.engineCount === 0) {
+    issues.push('Ship needs at least one engine module before launch.');
+  }
+
+  if (stats.weaponCount === 0) {
+    issues.push('Ship needs at least one weapon module before launch.');
+  }
+
+  return {
+    valid: issues.length === 0,
+    issues,
+    disconnectedModuleIds,
+  };
+}
+
+export function isBlueprintLaunchReady(blueprint: ShipBlueprint): boolean {
+  return getBlueprintValidation(blueprint).valid;
+}
+
 export function computeShipStats(blueprint: ShipBlueprint): ShipStats {
   const stats: ShipStats = {
     mass: 0,
@@ -185,4 +228,41 @@ export function parseBlueprint(text: string): ShipBlueprint | null {
   } catch {
     return null;
   }
+}
+
+function getDisconnectedModuleIds(blueprint: ShipBlueprint, bridges: PlacedModule[]): string[] {
+  if (blueprint.modules.length === 0 || bridges.length === 0) {
+    return [];
+  }
+
+  const occupied = getOccupiedHexes(blueprint);
+  const moduleById = new Map(blueprint.modules.map((module) => [module.instanceId, module]));
+  const visited = new Set<string>();
+  const queue = bridges.map((bridge) => bridge.instanceId);
+
+  while (queue.length > 0) {
+    const currentId = queue.shift();
+    if (!currentId || visited.has(currentId)) {
+      continue;
+    }
+    visited.add(currentId);
+    const module = moduleById.get(currentId);
+    if (!module) {
+      continue;
+    }
+
+    for (const hex of getWorldFootprint(module)) {
+      for (const neighbor of getNeighbors(hex)) {
+        const adjacent = occupied.get(hexKey(neighbor));
+        if (adjacent && !visited.has(adjacent.instanceId)) {
+          queue.push(adjacent.instanceId);
+        }
+      }
+    }
+  }
+
+  return blueprint.modules
+    .filter((module) => !visited.has(module.instanceId))
+    .map((module) => module.instanceId)
+    .sort();
 }

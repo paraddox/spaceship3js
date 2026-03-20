@@ -4,6 +4,7 @@ import type { ShipBlueprint, ShipStats } from '../core/types';
 import { applyCrewModifiers, DEFAULT_CREW_ALLOCATION } from '../game/crew';
 import { buildShipGroup, computeBlueprintRadius } from '../rendering/shipFactory';
 import { cloneBlueprint, computeShipStats, createExampleBlueprint } from '../state/shipBlueprint';
+import { buildWeaponLoadout, type WeaponProfile } from '../game/weapons';
 import {
   advanceEncounterState,
   computeCoolingPerSecond,
@@ -27,6 +28,8 @@ interface RuntimeShip {
   team: 'player' | 'enemy';
   blueprint: ShipBlueprint;
   stats: ShipStats;
+  weapons: WeaponProfile[];
+  weaponIndex: number;
   group: THREE.Group;
   position: THREE.Vector3;
   velocity: THREE.Vector3;
@@ -47,6 +50,9 @@ interface Projectile {
   damage: number;
   ttl: number;
   team: 'player' | 'enemy';
+  archetype: WeaponProfile['archetype'];
+  turnRate: number;
+  target: RuntimeShip | null;
   active: boolean;
 }
 
@@ -251,6 +257,9 @@ export class FlightScene {
         damage: 0,
         ttl: 0,
         team: 'player',
+        archetype: 'projectile',
+        turnRate: 0,
+        target: null,
         active: false,
       });
     }
@@ -308,12 +317,15 @@ export class FlightScene {
     group.rotation.y = rotation;
     this.scene.add(group);
     const stats = applyCrewModifiers(computeShipStats(blueprint), blueprint.crew);
+    const weapons = buildWeaponLoadout(blueprint);
     const powerFactor = computePowerFactor(stats.powerOutput, stats.powerDemand);
     return {
       id,
       team,
       blueprint,
       stats,
+      weapons,
+      weaponIndex: 0,
       group,
       position: position.clone(),
       velocity: new THREE.Vector3(),
@@ -402,33 +414,55 @@ export class FlightScene {
   }
 
   private tryFire(ship: RuntimeShip, direction: THREE.Vector3): void {
-    if (!ship.alive || ship.stats.weaponCount === 0) return;
+    if (!ship.alive || ship.weapons.length === 0) return;
     if (ship.cooldown > 0) return;
     if (isOverheated(ship.heat, ship.stats.heatCapacity * 1.02)) return;
 
-    const projectile = this.projectiles.find((candidate) => !candidate.active);
-    if (!projectile) return;
+    const weapon = ship.weapons[ship.weaponIndex % ship.weapons.length];
+    if (!weapon) return;
+    ship.weaponIndex = (ship.weaponIndex + 1) % ship.weapons.length;
 
     const effectiveCadence = getEffectiveWeaponCadence(
-      Math.max(ship.stats.shotsPerSecond || 0.5, 0.25),
+      Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
       ship.powerFactor,
       ship.heat,
       ship.stats.heatCapacity,
     );
     if (effectiveCadence <= 0.05) return;
 
-    const speed = Math.max(12, ship.stats.weaponRange / 20);
+    const normalizedDirection = direction.clone().normalize();
+    const damage = Math.max(4, weapon.damage * ship.powerFactor);
+
+    if (weapon.archetype === 'beam') {
+      this.fireBeam(ship, normalizedDirection, weapon, damage);
+      ship.cooldown = weapon.cooldown;
+      ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + weapon.heat);
+      return;
+    }
+
+    const projectile = this.projectiles.find((candidate) => !candidate.active);
+    if (!projectile) return;
+
+    const spread = weapon.spread;
+    const spreadDirection = normalizedDirection
+      .add(new THREE.Vector3((Math.random() - 0.5) * spread, 0, (Math.random() - 0.5) * spread))
+      .normalize();
+
     projectile.active = true;
     projectile.team = ship.team;
-    projectile.damage = Math.max(8, ship.stats.damagePerVolley / Math.max(ship.stats.weaponCount, 1)) * ship.powerFactor;
-    projectile.ttl = 2.2;
-    projectile.velocity.copy(direction.normalize().multiplyScalar(speed));
+    projectile.archetype = weapon.archetype;
+    projectile.damage = damage;
+    projectile.ttl = weapon.archetype === 'missile' ? 3.8 : 2.2;
+    projectile.turnRate = weapon.archetype === 'missile' ? 2.8 : 0;
+    projectile.target = weapon.archetype === 'missile' ? this.findNearestEnemy(ship) : null;
+    projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(weapon.projectileSpeed, 8)));
     projectile.mesh.visible = true;
-    projectile.mesh.position.copy(ship.position).add(direction.clone().multiplyScalar(ship.radius * 0.4));
-    (projectile.mesh.material as THREE.MeshBasicMaterial).color.set(ship.team === 'player' ? '#7dd3fc' : '#fb7185');
+    projectile.mesh.position.copy(ship.position).add(spreadDirection.clone().multiplyScalar(ship.radius * 0.4));
+    projectile.mesh.scale.setScalar(weapon.archetype === 'missile' ? 1.5 : weapon.archetype === 'laser' ? 0.9 : 1.1);
+    (projectile.mesh.material as THREE.MeshBasicMaterial).color.set(getProjectileColor(ship.team, weapon.archetype));
 
     ship.cooldown = 1 / effectiveCadence;
-    ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + Math.max(2, ship.stats.heatPerVolley));
+    ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + weapon.heat);
   }
 
   private updateProjectiles(dt: number): void {
@@ -439,6 +473,15 @@ export class FlightScene {
         this.deactivateProjectile(projectile);
         continue;
       }
+
+      if (projectile.archetype === 'missile' && projectile.target?.alive) {
+        const desired = projectile.target.position.clone().sub(projectile.mesh.position).normalize();
+        const speed = projectile.velocity.length();
+        const current = projectile.velocity.clone().normalize();
+        current.lerp(desired, Math.min(1, dt * projectile.turnRate));
+        projectile.velocity.copy(current.normalize().multiplyScalar(speed));
+      }
+
       projectile.mesh.position.addScaledVector(projectile.velocity, dt);
       if (projectile.mesh.position.length() > MAX_WORLD_RADIUS) {
         this.deactivateProjectile(projectile);
@@ -448,17 +491,57 @@ export class FlightScene {
         if (!ship.alive || ship.team === projectile.team) continue;
         const distance = projectile.mesh.position.distanceTo(ship.position);
         if (distance <= ship.radius * 0.45) {
-          ship.hp -= projectile.damage;
-          ship.heat = Math.min(ship.stats.heatCapacity * 1.25, ship.heat + projectile.damage * 0.08);
-          if (ship.hp <= 0) {
-            ship.alive = false;
-            ship.group.visible = false;
-          }
+          this.applyDamage(ship, projectile.damage);
           this.deactivateProjectile(projectile);
           break;
         }
       }
     }
+  }
+
+  private fireBeam(ship: RuntimeShip, direction: THREE.Vector3, weapon: WeaponProfile, damage: number): void {
+    let bestTarget: RuntimeShip | null = null;
+    let bestDistance = Infinity;
+    for (const candidate of this.ships) {
+      if (!candidate.alive || candidate.team === ship.team) continue;
+      const toTarget = candidate.position.clone().sub(ship.position);
+      const distance = toTarget.length();
+      if (distance > weapon.range / 30) continue;
+      const alignment = direction.dot(toTarget.normalize());
+      if (alignment < 0.96) continue;
+      if (distance < bestDistance) {
+        bestTarget = candidate;
+        bestDistance = distance;
+      }
+    }
+
+    if (bestTarget) {
+      this.applyDamage(bestTarget, damage * 0.85);
+      this.waveAnnouncement = `${ship.team === 'player' ? 'Beam strike' : 'Enemy beam'} connected`;
+    }
+  }
+
+  private applyDamage(ship: RuntimeShip, damage: number): void {
+    ship.hp -= damage;
+    ship.heat = Math.min(ship.stats.heatCapacity * 1.25, ship.heat + damage * 0.08);
+    if (ship.hp <= 0) {
+      ship.alive = false;
+      ship.group.visible = false;
+    }
+  }
+
+  private findNearestEnemy(source: RuntimeShip): RuntimeShip | null {
+    let best: RuntimeShip | null = null;
+    let bestDistance = Infinity;
+    for (const candidate of this.ships) {
+      if (!candidate.alive || candidate.team === source.team) continue;
+      const distance = candidate.position.distanceTo(source.position);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = candidate;
+      }
+    }
+    return best;
   }
 
   private coolShips(dt: number): void {
@@ -555,6 +638,13 @@ export class FlightScene {
     this.raycaster.setFromCamera(this.pointer, this.camera);
     this.raycaster.ray.intersectPlane(this.groundPlane, this.mouseWorld);
   }
+}
+
+function getProjectileColor(team: 'player' | 'enemy', archetype: WeaponProfile['archetype']): string {
+  if (archetype === 'missile') return team === 'player' ? '#fdba74' : '#fb7185';
+  if (archetype === 'laser') return team === 'player' ? '#7dd3fc' : '#f9a8d4';
+  if (archetype === 'beam') return team === 'player' ? '#5eead4' : '#fca5a5';
+  return team === 'player' ? '#fde68a' : '#fecaca';
 }
 
 function createWaveConfigs(): WaveConfig[] {

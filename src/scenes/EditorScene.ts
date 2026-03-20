@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { HEX_HEIGHT, HEX_SIZE, generateHexRing, hexKey, hexToWorld, normalizeRotation, worldToHex } from '../core/hex';
 import type { CrewAllocation, HexCoord, ShipBlueprint } from '../core/types';
 import { DEFAULT_CREW_ALLOCATION, applyCrewModifiers } from '../game/crew';
+import { ENCOUNTER_PRESETS } from '../game/encounters';
 import { PALETTE_GROUPS } from '../data/moduleCatalog';
 import { buildPreviewGroup, buildShipGroup } from '../rendering/shipFactory';
 import {
@@ -9,7 +10,9 @@ import {
   cloneBlueprint,
   computeShipStats,
   createExampleBlueprint,
+  getBlueprintValidation,
   getModuleDefinition,
+  isBlueprintLaunchReady,
   parseBlueprint,
   placeModule,
   removeModuleAtHex,
@@ -211,6 +214,7 @@ export class EditorScene {
           }).join('')}
         </div>
         <div id="editor-preview" class="muted"></div>
+        <div id="editor-validation" class="muted"></div>
         <div class="toolbar-row">
           <button class="primary" data-action="launch">Launch Flight Test</button>
         </div>
@@ -260,6 +264,10 @@ export class EditorScene {
           }
         }
         if (action === 'launch') {
+          if (!isBlueprintLaunchReady(this.blueprint)) {
+            this.refreshInfo();
+            return;
+          }
           this.onLaunch(cloneBlueprint(this.blueprint));
           return;
         }
@@ -314,8 +322,10 @@ export class EditorScene {
     const stats = applyCrewModifiers(baseStats, this.blueprint.crew);
     const selected = getModuleDefinition(this.selectedModuleId);
     const totalCrew = Object.values(this.blueprint.crew).reduce((sum, value) => sum + value, 0);
+    const validation = getBlueprintValidation(this.blueprint);
     const statsEl = this.uiRoot.querySelector('#editor-stats');
     const previewEl = this.uiRoot.querySelector('#editor-preview');
+    const validationEl = this.uiRoot.querySelector('#editor-validation');
     const crewEl = this.uiRoot.querySelector('#crew-grid');
     if (statsEl) {
       statsEl.innerHTML = [
@@ -355,9 +365,19 @@ export class EditorScene {
     if (previewEl) {
       previewEl.innerHTML = `${selected.displayName} · rot ${this.previewRotation} · ${this.hoveredHex ? `hover ${hexKey(this.hoveredHex)}` : 'move cursor over grid'} · crew-adjusted thrust ${stats.thrust.toFixed(0)}`;
     }
+    if (validationEl) {
+      validationEl.innerHTML = validation.valid
+        ? '<span class="success">Launch-ready configuration.</span>'
+        : `<span class="warning">${validation.issues.join(' ')}</span>`;
+    }
     this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-module]').forEach((button) => {
       button.classList.toggle('active', button.dataset.module === this.selectedModuleId);
     });
+    const launchButton = this.uiRoot.querySelector<HTMLButtonElement>('[data-action="launch"]');
+    if (launchButton) {
+      launchButton.disabled = !validation.valid;
+      launchButton.title = validation.valid ? 'Launch your ship into the sandbox.' : validation.issues.join(' ');
+    }
   }
 
   private pickHex(event: PointerEvent): HexCoord | null {
