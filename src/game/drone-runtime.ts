@@ -13,6 +13,9 @@ export interface DroneRuntimeState {
   fireRate: number;
   team: 'player' | 'enemy';
   hp: number;
+  maxHp: number;
+  respawnDelay: number;
+  respawnRemaining: number;
   active: boolean;
 }
 
@@ -42,6 +45,9 @@ export function createDroneInstances(
     fireRate: 0.8,
     team,
     hp: 20,
+    maxHp: 20,
+    respawnDelay: 6,
+    respawnRemaining: 0,
     active: true,
   }));
 }
@@ -66,6 +72,13 @@ export function advanceDrone(
   anchor: { x: number; z: number },
   dt: number,
 ): DroneRuntimeState {
+  if (!drone.active) {
+    return {
+      ...drone,
+      respawnRemaining: Math.max(0, drone.respawnRemaining - dt),
+      cooldown: Math.max(0, drone.cooldown - dt),
+    };
+  }
   const orbitAngle = drone.orbitAngle + dt * 1.8;
   return {
     ...drone,
@@ -73,5 +86,31 @@ export function advanceDrone(
     x: anchor.x + Math.cos(orbitAngle) * drone.orbitRadius,
     z: anchor.z + Math.sin(orbitAngle) * drone.orbitRadius,
     cooldown: Math.max(0, drone.cooldown - dt),
+  };
+}
+
+export function applyDroneDamage(drone: DroneRuntimeState, damage: number): DroneRuntimeState {
+  const hp = Math.max(0, drone.hp - damage);
+  if (hp > 0) {
+    return { ...drone, hp };
+  }
+  return {
+    ...drone,
+    hp: 0,
+    active: false,
+    respawnRemaining: drone.respawnDelay,
+    cooldown: 0,
+  };
+}
+
+export function relaunchDrone(drone: DroneRuntimeState, anchor: { x: number; z: number }): DroneRuntimeState {
+  const orbitAngle = drone.orbitAngle + Math.PI / 3;
+  return {
+    ...drone,
+    active: true,
+    hp: drone.maxHp,
+    respawnRemaining: 0,
+    x: anchor.x + Math.cos(orbitAngle) * drone.orbitRadius,
+    z: anchor.z + Math.sin(orbitAngle) * drone.orbitRadius,
   };
 }

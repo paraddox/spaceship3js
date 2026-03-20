@@ -9,8 +9,10 @@ import { buildWeaponLoadout, type WeaponProfile } from '../game/weapons';
 import { buildDroneProfiles } from '../game/drones';
 import {
   advanceDrone,
+  applyDroneDamage,
   chooseDroneTarget,
   createDroneInstances,
+  relaunchDrone,
   type DroneRuntimeState,
   type DroneTarget,
 } from '../game/drone-runtime';
@@ -511,6 +513,22 @@ export class FlightScene {
         this.deactivateProjectile(projectile);
         continue;
       }
+
+      let hit = false;
+      for (const drone of this.drones) {
+        if (!drone.state.active || drone.state.team === projectile.team) continue;
+        const distance = Math.hypot(projectile.mesh.position.x - drone.state.x, projectile.mesh.position.z - drone.state.z);
+        if (distance <= 0.45) {
+          drone.state = applyDroneDamage(drone.state, projectile.damage);
+          drone.mesh.visible = drone.state.active;
+          this.deactivateProjectile(projectile);
+          this.waveAnnouncement = `${projectile.team === 'player' ? 'Enemy drone hit' : 'Support drone hit'}`;
+          hit = true;
+          break;
+        }
+      }
+      if (hit) continue;
+
       for (const ship of this.ships) {
         if (!ship.alive || ship.team === projectile.team) continue;
         const distance = projectile.mesh.position.distanceTo(ship.position);
@@ -539,7 +557,19 @@ export class FlightScene {
         drone.state.active = false;
         continue;
       }
+
       drone.state = advanceDrone(drone.state, { x: owner.position.x, z: owner.position.z }, dt);
+
+      if (!drone.state.active) {
+        drone.mesh.visible = false;
+        if (drone.state.respawnRemaining <= 0) {
+          drone.state = relaunchDrone(drone.state, { x: owner.position.x, z: owner.position.z });
+          drone.mesh.visible = true;
+          this.waveAnnouncement = `${owner.team === 'player' ? 'Support drone relaunched' : 'Enemy drone relaunched'}`;
+        }
+        continue;
+      }
+
       drone.mesh.visible = true;
       drone.mesh.position.set(drone.state.x, 0.35, drone.state.z);
       const target = chooseDroneTarget(drone.state, targets);
@@ -714,6 +744,8 @@ export class FlightScene {
     const crewSummary = Object.entries(this.player.blueprint.crew)
       .map(([role, value]) => `${role[0].toUpperCase()}:${value}`)
       .join(' ');
+    const activeDrones = this.drones.filter((drone) => drone.state.team === 'player' && drone.state.active).length;
+    const totalDrones = this.player.stats.droneCapacity;
 
     hud.innerHTML = `
       <div class="hud-grid">
@@ -725,6 +757,7 @@ export class FlightScene {
         <div><span>Velocity</span><strong>${this.player.velocity.length().toFixed(1)}</strong></div>
         <div><span>Enemies</span><strong>${enemiesAlive}</strong></div>
         <div><span>Status</span><strong>${overheatState ? 'Overheated' : 'Nominal'}</strong></div>
+        <div><span>Drones</span><strong>${activeDrones} / ${totalDrones}</strong></div>
       </div>
       <p class="muted">Crew ${crewSummary}</p>
       <div class="meter"><span style="width:${hpRatio * 100}%"></span></div>

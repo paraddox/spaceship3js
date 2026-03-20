@@ -3,6 +3,8 @@ import {
   createDroneInstances,
   chooseDroneTarget,
   advanceDrone,
+  applyDroneDamage,
+  relaunchDrone,
   type DroneRuntimeState,
 } from '../src/game/drone-runtime';
 import { buildDroneProfiles } from '../src/game/drones';
@@ -63,11 +65,63 @@ describe('drone runtime helpers', () => {
       fireRate: 0.8,
       team: 'player',
       hp: 20,
+      maxHp: 20,
+      respawnDelay: 6,
+      respawnRemaining: 0,
       active: true,
     };
     const next = advanceDrone(drone, { x: 4, z: 4 }, 0.5);
     expect(next.x).not.toBe(0);
     expect(next.z).not.toBe(0);
     expect(next.cooldown).toBe(0);
+  });
+
+  it('deactivates a drone when it takes lethal damage', () => {
+    const drone: DroneRuntimeState = {
+      id: 'd1-1',
+      parentModuleId: 'd1',
+      x: 0,
+      z: 0,
+      orbitRadius: 2,
+      orbitAngle: 0,
+      damage: 8,
+      range: 240,
+      cooldown: 0,
+      fireRate: 0.8,
+      team: 'player',
+      hp: 6,
+      maxHp: 20,
+      respawnDelay: 6,
+      respawnRemaining: 0,
+      active: true,
+    };
+    const next = applyDroneDamage(drone, 10);
+    expect(next.active).toBe(false);
+    expect(next.respawnRemaining).toBe(6);
+  });
+
+  it('relaunches an inactive drone at its carrier anchor', () => {
+    const drone: DroneRuntimeState = {
+      id: 'd1-1',
+      parentModuleId: 'd1',
+      x: 0,
+      z: 0,
+      orbitRadius: 2,
+      orbitAngle: 1,
+      damage: 8,
+      range: 240,
+      cooldown: 0,
+      fireRate: 0.8,
+      team: 'player',
+      hp: 0,
+      maxHp: 20,
+      respawnDelay: 6,
+      respawnRemaining: 0,
+      active: false,
+    };
+    const relaunched = relaunchDrone(drone, { x: 5, z: -3 });
+    expect(relaunched.active).toBe(true);
+    expect(relaunched.hp).toBe(20);
+    expect(relaunched.x).not.toBe(0);
   });
 });
