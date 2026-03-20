@@ -18,6 +18,7 @@ import {
 } from '../game/drone-runtime';
 import { createEncounterReward, type EncounterReward } from '../game/progression';
 import { evaluateObjective, type EncounterObjective } from '../game/objectives';
+import { computeProjectileSpawnPosition } from '../game/projectiles';
 import {
   advanceEncounterState,
   computeCoolingPerSecond,
@@ -203,7 +204,7 @@ export class FlightScene {
           <button data-action="reset">Reset Encounter</button>
         </div>
       </div>
-      <div class="overlay bottom-left panel compact-panel">
+      <div class="overlay bottom-right panel compact-panel">
         <strong>Controls</strong>
         <ul>
           <li>W/S: thrust forward or reverse</li>
@@ -483,7 +484,7 @@ export class FlightScene {
     projectile.target = weapon.archetype === 'missile' ? this.findNearestEnemy(ship) : null;
     projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(weapon.projectileSpeed, 8)));
     projectile.mesh.visible = true;
-    projectile.mesh.position.copy(ship.position).add(spreadDirection.clone().multiplyScalar(ship.radius * 0.4));
+    projectile.mesh.position.copy(computeProjectileSpawnPosition(ship.position, spreadDirection, ship.radius));
     projectile.mesh.scale.setScalar(weapon.archetype === 'missile' ? 1.5 : weapon.archetype === 'laser' ? 0.9 : 1.1);
     (projectile.mesh.material as THREE.MeshBasicMaterial).color.set(getProjectileColor(ship.team, weapon.archetype));
 

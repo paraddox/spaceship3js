@@ -261,7 +261,7 @@ export class EditorScene {
           <button class="primary" data-action="launch">Launch Flight Test</button>
         </div>
       </div>
-      <div class="overlay bottom-left panel compact-panel">
+      <div class="overlay bottom-right panel compact-panel">
         <strong>Controls</strong>
         <ul>
           <li>Left click: place module</li>
