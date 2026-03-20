@@ -19,6 +19,7 @@ import {
 import { createEncounterReward, type EncounterReward } from '../game/progression';
 import { evaluateObjective, type EncounterObjective } from '../game/objectives';
 import { computeProjectileSpawnPosition } from '../game/projectiles';
+import { buildEncounterDebrief } from '../game/debrief';
 import { advanceEffect, createBeamEffect, createExplosionEffect, createImpactEffect, type CombatEffectState } from '../game/effects';
 import {
   advanceEncounterState,
@@ -209,6 +210,7 @@ export class FlightScene {
       <div class="overlay top-right panel compact-panel">
         <strong>Flight Test</strong>
         <p class="muted">A reduced Three.js combat slice of the original sandbox plans.</p>
+        <div id="flight-debrief" class="muted"></div>
         <div class="toolbar-row">
           <button class="primary" data-action="return-editor">Return to Editor</button>
           <button data-action="reset">Reset Encounter</button>
@@ -837,6 +839,7 @@ export class FlightScene {
 
   private refreshHud(): void {
     const hud = this.uiRoot.querySelector('#flight-hud');
+    const debrief = this.uiRoot.querySelector('#flight-debrief');
     if (!hud) return;
     const enemiesAlive = this.ships.filter((ship) => ship.team === 'enemy' && ship.alive).length;
     const hpRatio = Math.max(0, this.player.hp) / Math.max(1, this.player.stats.maxHp);
@@ -863,10 +866,27 @@ export class FlightScene {
       <p class="muted">Crew ${crewSummary}</p>
       <div class="meter"><span style="width:${hpRatio * 100}%"></span></div>
       <div class="meter heat"><span style="width:${Math.min(100, heatRatio * 100)}%"></span></div>
+      <p class="muted">${this.encounterObjective.label}</p>
       <p class="muted">${this.waveAnnouncement}</p>
       ${!this.player.alive ? '<p class="warning">Your ship is disabled. Reset or return to the editor.</p>' : ''}
       ${this.encounterOutcome === 'victory' ? '<p class="success">Encounter cleared. Return to the editor or reset for another run.</p>' : ''}
     `;
+
+    if (debrief) {
+      if (this.encounterOutcome === 'continue') {
+        debrief.innerHTML = '';
+      } else {
+        const report = buildEncounterDebrief({
+          encounterName: this.encounterId,
+          objectiveLabel: this.encounterObjective.label,
+          outcome: this.encounterOutcome,
+          creditsEarned: this.encounterOutcome === 'victory' ? createEncounterReward(this.waves.length, this.waves.reduce((sum, wave) => sum + wave.enemies.length, 0), true).credits : 0,
+          bestScore: this.waves.reduce((sum, wave) => sum + wave.enemies.length, 0) * 100,
+          elapsedSeconds: this.elapsedEncounterSeconds,
+        });
+        debrief.innerHTML = `<strong>${report.title}</strong><br>${report.lines.join('<br>')}`;
+      }
+    }
   }
 
   private updateMouseWorld(event: PointerEvent): void {
