@@ -171,6 +171,8 @@ export function computeShipStats(blueprint: ShipBlueprint): ShipStats {
     cooling: 0,
     engineCount: 0,
     weaponCount: 0,
+    droneBayCount: 0,
+    droneCapacity: 0,
     thrust: 0,
     damagePerVolley: 0,
     shotsPerSecond: 0,
@@ -198,6 +200,11 @@ export function computeShipStats(blueprint: ShipBlueprint): ShipStats {
       stats.shotsPerSecond += Number(def.stats.fireRate ?? 0.4);
       stats.weaponRange = Math.max(stats.weaponRange, Number(def.stats.range ?? def.stats.beamRange ?? 0));
       stats.heatPerVolley += Number(def.stats.heatPerShot ?? def.stats.heatPerSecond ?? 0);
+    }
+
+    if (def.category === 'drone_bay') {
+      stats.droneBayCount += 1;
+      stats.droneCapacity += Number(def.stats.capacity ?? 0);
     }
   }
 

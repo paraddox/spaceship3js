@@ -51,6 +51,8 @@ export interface ShipStats {
   cooling: number;
   engineCount: number;
   weaponCount: number;
+  droneBayCount: number;
+  droneCapacity: number;
   thrust: number;
   damagePerVolley: number;
   shotsPerSecond: number;
