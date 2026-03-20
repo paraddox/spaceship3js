@@ -36,9 +36,11 @@ describe('encounter presets', () => {
   it('includes explicit objective metadata for presets', () => {
     const gauntlet = getEncounterPreset('gauntlet');
     const survival = getEncounterPreset('survival');
+    const escort = getEncounterPreset('escort');
     expect(gauntlet?.objective.type).toBe('eliminate_all');
     expect(survival?.objective.type).toBe('survive');
     expect(survival?.objective.durationSeconds).toBeGreaterThan(0);
+    expect(escort?.objective.type).toBe('protect_ally');
   });
 
   it('returns undefined for unknown presets', () => {

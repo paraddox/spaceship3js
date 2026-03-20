@@ -44,6 +44,7 @@ interface RuntimeShip {
   team: 'player' | 'enemy';
   blueprint: ShipBlueprint;
   stats: ShipStats;
+  protectedTarget?: boolean;
   weapons: WeaponProfile[];
   weaponIndex: number;
   group: THREE.Group;
@@ -308,6 +309,13 @@ export class FlightScene {
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
     this.spawnDronesForShip(this.player);
+    if (this.encounterObjective.type === 'protect_ally') {
+      const preset = getEncounterPreset(this.encounterId);
+      if (preset?.alliedBlueprint) {
+        const ally = this.createShip('ally-escort', 'player', cloneBlueprint(preset.alliedBlueprint), new THREE.Vector3(0, 0, 2), Math.PI, 0, 0, true);
+        this.ships.push(ally);
+      }
+    }
     this.spawnWave(1);
   }
 
@@ -338,6 +346,7 @@ export class FlightScene {
     rotation: number,
     preferredRange: number,
     fireJitter: number,
+    protectedTarget = false,
   ): RuntimeShip {
     const group = buildShipGroup(blueprint);
     group.position.copy(position);
@@ -351,6 +360,7 @@ export class FlightScene {
       team,
       blueprint,
       stats,
+      protectedTarget,
       weapons,
       weaponIndex: 0,
       group,
@@ -659,26 +669,34 @@ export class FlightScene {
 
   private updateEncounterState(): void {
     const remainingEnemies = this.ships.filter((ship) => ship.team === 'enemy' && ship.alive).length;
+    const protectedAlive = this.ships.every((ship) => !ship.protectedTarget || ship.alive);
 
-    if (this.encounterObjective.type === 'survive') {
+    if (this.encounterObjective.type === 'survive' || this.encounterObjective.type === 'protect_ally') {
       this.encounterOutcome = evaluateObjective(this.encounterObjective, {
         elapsedSeconds: this.elapsedEncounterSeconds,
         remainingEnemies,
         playerAlive: this.player.alive,
+        protectedAlive,
       });
 
       if (this.encounterOutcome === 'victory') {
-        this.waveAnnouncement = 'Survival objective complete';
+        this.waveAnnouncement = this.encounterObjective.type === 'survive'
+          ? 'Survival objective complete'
+          : 'Convoy secured';
         if (!this.hasGrantedReward) {
           const totalEnemies = this.waves.reduce((sum, wave) => sum + wave.enemies.length, 0);
           this.onReward(this.encounterId, createEncounterReward(this.waves.length, totalEnemies, true));
           this.hasGrantedReward = true;
         }
       } else if (this.encounterOutcome === 'defeat') {
-        this.waveAnnouncement = 'Player ship disabled';
-      } else {
+        this.waveAnnouncement = this.encounterObjective.type === 'protect_ally'
+          ? 'Protected ship lost'
+          : 'Player ship disabled';
+      } else if (this.encounterObjective.type === 'survive') {
         const remaining = Math.max(0, Math.ceil((this.encounterObjective.durationSeconds ?? 0) - this.elapsedEncounterSeconds));
         this.waveAnnouncement = `${this.encounterObjective.label} (${remaining}s)`;
+      } else {
+        this.waveAnnouncement = `${this.encounterObjective.label} · hostiles remaining ${remainingEnemies}`;
       }
       return;
     }

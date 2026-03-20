@@ -21,4 +21,14 @@ describe('encounter objectives', () => {
     const objective: EncounterObjective = { type: 'survive', label: 'Survive the ambush', durationSeconds: 45 };
     expect(evaluateObjective(objective, { elapsedSeconds: 5, remainingEnemies: 5, playerAlive: false })).toBe('defeat');
   });
+
+  it('fails protect-ally objectives when the protected ship is destroyed', () => {
+    const objective: EncounterObjective = { type: 'protect_ally', label: 'Protect the convoy ship' };
+    expect(evaluateObjective(objective, { elapsedSeconds: 12, remainingEnemies: 2, playerAlive: true, protectedAlive: false })).toBe('defeat');
+  });
+
+  it('wins protect-ally objectives once hostiles are cleared and the ally survives', () => {
+    const objective: EncounterObjective = { type: 'protect_ally', label: 'Protect the convoy ship' };
+    expect(evaluateObjective(objective, { elapsedSeconds: 30, remainingEnemies: 0, playerAlive: true, protectedAlive: true })).toBe('victory');
+  });
 });

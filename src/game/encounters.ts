@@ -23,6 +23,7 @@ export interface EncounterPreset {
   displayName: string;
   description: string;
   objective: EncounterObjective;
+  alliedBlueprint?: ShipBlueprint;
   waves: EncounterWave[];
 }
 
@@ -59,6 +60,17 @@ const frigateEnemy: ShipBlueprint = {
     { instanceId: 'drone-f1', definitionId: 'core:light_drone_bay', position: { q: -1, r: 1 }, rotation: 0 },
     { instanceId: 'weapon-f1', definitionId: 'core:missile_launcher', position: { q: 0, r: -2 }, rotation: 0 },
     { instanceId: 'weapon-f2', definitionId: 'core:laser_light', position: { q: -1, r: -1 }, rotation: 0 },
+  ],
+};
+
+const convoyAlly: ShipBlueprint = {
+  name: 'Civilian Convoy',
+  crew: { ...DEFAULT_CREW_ALLOCATION, engineer: 2 },
+  modules: [
+    { instanceId: 'ally-bridge', definitionId: 'core:bridge_scout', position: { q: 0, r: 0 }, rotation: 0 },
+    { instanceId: 'ally-reactor', definitionId: 'core:reactor_small', position: { q: 1, r: 0 }, rotation: 0 },
+    { instanceId: 'ally-hull', definitionId: 'core:hull_2x1', position: { q: -1, r: 0 }, rotation: 0 },
+    { instanceId: 'ally-engine', definitionId: 'core:thruster_small', position: { q: 2, r: -1 }, rotation: 0 },
   ],
 };
 
@@ -119,6 +131,22 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
           { id: 'survival-1', blueprint: waveOneEnemy, position: new THREE.Vector3(-12, 0, -8), rotation: 0.15, preferredRange: 7.5, fireJitter: 0.35 },
           { id: 'survival-2', blueprint: beamEnemy, position: new THREE.Vector3(0, 0, -12), rotation: 0, preferredRange: 7.5, fireJitter: 0.1 },
           { id: 'survival-3', blueprint: missileEnemy, position: new THREE.Vector3(12, 0, -8), rotation: -0.15, preferredRange: 11.5, fireJitter: 0.45 },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'escort',
+    displayName: 'Convoy Escort',
+    description: 'Protect a fragile civilian convoy ship while clearing raiders.',
+    objective: { type: 'protect_ally', label: 'Protect the convoy ship' },
+    alliedBlueprint: convoyAlly,
+    waves: [
+      {
+        name: 'Raiders',
+        enemies: [
+          { id: 'escort-1', blueprint: waveOneEnemy, position: new THREE.Vector3(-10, 0, -7), rotation: 0.15, preferredRange: 7.5, fireJitter: 0.3 },
+          { id: 'escort-2', blueprint: beamEnemy, position: new THREE.Vector3(10, 0, -7), rotation: -0.15, preferredRange: 8.5, fireJitter: 0.2 },
         ],
       },
     ],
