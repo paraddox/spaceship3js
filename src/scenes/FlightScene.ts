@@ -19,6 +19,7 @@ import {
 import { createEncounterReward, type EncounterReward } from '../game/progression';
 import { evaluateObjective, type EncounterObjective } from '../game/objectives';
 import { computeProjectileSpawnPosition } from '../game/projectiles';
+import { advanceEffect, createBeamEffect, createExplosionEffect, createImpactEffect, type CombatEffectState } from '../game/effects';
 import {
   advanceEncounterState,
   computeCoolingPerSecond,
@@ -79,6 +80,11 @@ interface RuntimeDrone {
   state: DroneRuntimeState;
 }
 
+interface RuntimeEffect {
+  state: CombatEffectState;
+  object: THREE.Object3D;
+}
+
 const PROJECTILE_POOL_SIZE = 96;
 const ARENA_RADIUS = 18;
 const MAX_WORLD_RADIUS = 40;
@@ -96,9 +102,11 @@ export class FlightScene {
   private readonly groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private readonly arenaGroup = new THREE.Group();
   private readonly projectileGroup = new THREE.Group();
+  private readonly effectGroup = new THREE.Group();
   private readonly ships: RuntimeShip[] = [];
   private readonly drones: RuntimeDrone[] = [];
   private readonly projectiles: Projectile[] = [];
+  private readonly effects: RuntimeEffect[] = [];
   private readonly keys = new Set<string>();
   private readonly waves: EncounterWave[];
 
@@ -143,7 +151,7 @@ export class FlightScene {
     const ambient = new THREE.AmbientLight(0xffffff, 1.2);
     const rim = new THREE.DirectionalLight(0xbfe1ff, 1.1);
     rim.position.set(8, 10, 6);
-    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup);
+    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup);
 
     this.buildArena();
     this.buildProjectiles();
@@ -159,6 +167,7 @@ export class FlightScene {
     this.updateEnemies(dt);
     this.updateDrones(dt);
     this.updateProjectiles(dt);
+    this.updateEffects(dt);
     this.coolShips(dt);
     this.updateEncounterState();
     this.refreshHud();
@@ -293,8 +302,12 @@ export class FlightScene {
     for (const drone of this.drones) {
       this.scene.remove(drone.mesh);
     }
+    for (const effect of this.effects) {
+      this.effectGroup.remove(effect.object);
+    }
     this.ships.length = 0;
     this.drones.length = 0;
+    this.effects.length = 0;
     for (const projectile of this.projectiles) {
       this.deactivateProjectile(projectile);
     }
@@ -632,6 +645,8 @@ export class FlightScene {
 
     if (bestTarget) {
       this.applyDamage(bestTarget, damage * 0.85);
+      this.spawnBeamVisual(ship.position, bestTarget.position, ship.team);
+      this.spawnImpactVisual(bestTarget.position, ship.team === 'player' ? '#5eead4' : '#fca5a5');
       this.waveAnnouncement = `${ship.team === 'player' ? 'Beam strike' : 'Enemy beam'} connected`;
     }
   }
@@ -639,9 +654,11 @@ export class FlightScene {
   private applyDamage(ship: RuntimeShip, damage: number): void {
     ship.hp -= damage;
     ship.heat = Math.min(ship.stats.heatCapacity * 1.25, ship.heat + damage * 0.08);
+    this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185');
     if (ship.hp <= 0) {
       ship.alive = false;
       ship.group.visible = false;
+      this.spawnExplosionVisual(ship.position, ship.team === 'player' ? '#fca5a5' : '#fb7185');
     }
   }
 
@@ -657,6 +674,71 @@ export class FlightScene {
       }
     }
     return best;
+  }
+
+  private spawnBeamVisual(start: THREE.Vector3, end: THREE.Vector3, team: 'player' | 'enemy'): void {
+    const effect = createBeamEffect(start.clone().setY(0.42), end.clone().setY(0.42), team === 'player' ? '#5eead4' : '#fca5a5');
+    const points = [effect.start, effect.end ?? effect.start.clone()];
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    const material = new THREE.LineBasicMaterial({ color: effect.color, transparent: true, opacity: effect.opacity });
+    const line = new THREE.Line(geometry, material);
+    this.effectGroup.add(line);
+    this.effects.push({ state: effect, object: line });
+  }
+
+  private spawnImpactVisual(position: THREE.Vector3, color: string): void {
+    const effect = createImpactEffect(position.clone().setY(0.35), color);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ color: effect.color, transparent: true, opacity: effect.opacity }));
+    sprite.position.copy(effect.start);
+    sprite.scale.set(effect.scale, effect.scale, effect.scale);
+    this.effectGroup.add(sprite);
+    this.effects.push({ state: effect, object: sprite });
+  }
+
+  private spawnExplosionVisual(position: THREE.Vector3, color: string): void {
+    const effect = createExplosionEffect(position.clone().setY(0.45), color);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ color: effect.color, transparent: true, opacity: effect.opacity }));
+    sprite.position.copy(effect.start);
+    sprite.scale.set(effect.scale, effect.scale, effect.scale);
+    this.effectGroup.add(sprite);
+    this.effects.push({ state: effect, object: sprite });
+  }
+
+  private updateEffects(dt: number): void {
+    for (let i = this.effects.length - 1; i >= 0; i -= 1) {
+      const runtime = this.effects[i];
+      runtime.state = advanceEffect(runtime.state, dt);
+      const progress = runtime.state.ttl <= 0 ? 1 : runtime.state.age / runtime.state.ttl;
+
+      if ('material' in runtime.object && runtime.object.material) {
+        const material = runtime.object.material as THREE.Material & { opacity?: number };
+        if ('opacity' in material && typeof material.opacity === 'number') {
+          material.opacity = runtime.state.opacity;
+        }
+      }
+
+      runtime.object.position.copy(runtime.state.start);
+      runtime.object.scale.set(runtime.state.scale, runtime.state.scale, runtime.state.scale);
+
+      if (runtime.state.kind === 'beam' && runtime.object instanceof THREE.Line) {
+        const points = [runtime.state.start, runtime.state.end ?? runtime.state.start.clone()];
+        runtime.object.geometry.dispose();
+        runtime.object.geometry = new THREE.BufferGeometry().setFromPoints(points);
+      }
+
+      if (progress >= 1 || runtime.state.opacity <= 0) {
+        this.effectGroup.remove(runtime.object);
+        if ('geometry' in runtime.object && runtime.object.geometry) {
+          (runtime.object.geometry as THREE.BufferGeometry).dispose();
+        }
+        if ('material' in runtime.object && runtime.object.material) {
+          const material = runtime.object.material as THREE.Material | THREE.Material[];
+          if (Array.isArray(material)) material.forEach((entry: THREE.Material) => entry.dispose());
+          else material.dispose();
+        }
+        this.effects.splice(i, 1);
+      }
+    }
   }
 
   private coolShips(dt: number): void {
