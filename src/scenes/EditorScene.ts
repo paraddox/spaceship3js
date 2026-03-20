@@ -5,6 +5,7 @@ import type { ProgressionState } from '../game/progression';
 import { DEFAULT_CREW_ALLOCATION, applyCrewModifiers } from '../game/crew';
 import { ENCOUNTER_PRESETS } from '../game/encounters';
 import type { HangarEntry } from '../game/hangar';
+import { MODULE_UNLOCK_COSTS, canUnlockModule, isModuleUnlocked } from '../game/unlocks';
 import { PALETTE_GROUPS } from '../data/moduleCatalog';
 import { buildPreviewGroup, buildShipGroup } from '../rendering/shipFactory';
 import {
@@ -35,6 +36,7 @@ interface EditorSceneOptions {
   onSaveToHangar: (name: string, blueprint: ShipBlueprint) => void;
   onLoadFromHangar: (entryId: string) => void;
   onDeleteFromHangar: (entryId: string) => void;
+  onUnlockModule: (moduleId: string) => void;
   onLaunch: (blueprint: ShipBlueprint, encounterId: string) => void;
 }
 
@@ -47,6 +49,7 @@ export class EditorScene {
   private readonly onSaveToHangar: (name: string, blueprint: ShipBlueprint) => void;
   private readonly onLoadFromHangar: (entryId: string) => void;
   private readonly onDeleteFromHangar: (entryId: string) => void;
+  private readonly onUnlockModule: (moduleId: string) => void;
   private readonly onLaunch: (blueprint: ShipBlueprint, encounterId: string) => void;
 
   private readonly scene = new THREE.Scene();
@@ -113,7 +116,7 @@ export class EditorScene {
     }
   };
 
-  constructor({ renderer, mount, uiRoot, blueprint, selectedEncounterId, hangarEntries, progression, onBlueprintChange, onEncounterChange, onSaveToHangar, onLoadFromHangar, onDeleteFromHangar, onLaunch }: EditorSceneOptions) {
+  constructor({ renderer, mount, uiRoot, blueprint, selectedEncounterId, hangarEntries, progression, onBlueprintChange, onEncounterChange, onSaveToHangar, onLoadFromHangar, onDeleteFromHangar, onUnlockModule, onLaunch }: EditorSceneOptions) {
     this.renderer = renderer;
     this.mount = mount;
     this.uiRoot = uiRoot;
@@ -126,6 +129,7 @@ export class EditorScene {
     this.onSaveToHangar = onSaveToHangar;
     this.onLoadFromHangar = onLoadFromHangar;
     this.onDeleteFromHangar = onDeleteFromHangar;
+    this.onUnlockModule = onUnlockModule;
     this.onLaunch = onLaunch;
 
     this.camera.position.set(0, 18, 0.001);
@@ -243,7 +247,11 @@ export class EditorScene {
         <div class="module-grid">
           ${PALETTE_GROUPS.flat().map((id) => {
             const def = getModuleDefinition(id);
-            return `<button class="module-button" data-module="${id}">${def.displayName}</button>`;
+            const unlocked = isModuleUnlocked(this.progression, id);
+            const cost = MODULE_UNLOCK_COSTS[id] ?? 0;
+            return unlocked
+              ? `<button class="module-button" data-module="${id}">${def.displayName}</button>`
+              : `<button class="module-button locked" data-unlock-module="${id}" title="Unlock for ${cost} credits">🔒 ${def.displayName} (${cost})</button>`;
           }).join('')}
         </div>
         <div id="editor-preview" class="muted"></div>
@@ -267,6 +275,15 @@ export class EditorScene {
       button.addEventListener('click', () => {
         this.selectedModuleId = button.dataset.module ?? this.selectedModuleId;
         this.refreshInfo();
+      });
+    });
+
+    this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-unlock-module]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const moduleId = button.dataset.unlockModule;
+        if (!moduleId) return;
+        if (!canUnlockModule(this.progression, moduleId)) return;
+        this.onUnlockModule(moduleId);
       });
     });
 

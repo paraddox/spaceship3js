@@ -13,6 +13,13 @@ describe('progression helpers', () => {
       credits: 0,
       completedEncounterIds: [],
       bestEncounterScores: {},
+      unlockedModuleIds: [
+        'core:bridge_scout',
+        'core:hull_1x1',
+        'core:reactor_small',
+        'core:thruster_small',
+        'core:laser_light',
+      ],
     });
   });
 
@@ -27,6 +34,7 @@ describe('progression helpers', () => {
       credits: 50,
       completedEncounterIds: [],
       bestEncounterScores: {},
+      unlockedModuleIds: [...DEFAULT_PROGRESSION_STATE.unlockedModuleIds],
     };
     const next = applyEncounterReward(state, 'gauntlet', { credits: 120, score: 1800, victory: true });
     expect(next.credits).toBe(170);
@@ -39,6 +47,7 @@ describe('progression helpers', () => {
       credits: 0,
       completedEncounterIds: ['gauntlet'],
       bestEncounterScores: { gauntlet: 2400 },
+      unlockedModuleIds: [...DEFAULT_PROGRESSION_STATE.unlockedModuleIds],
     };
     const next = applyEncounterReward(state, 'gauntlet', { credits: 50, score: 1200, victory: true });
     expect(next.bestEncounterScores.gauntlet).toBe(2400);

@@ -15,6 +15,7 @@ import {
   type EncounterReward,
   type ProgressionState,
 } from '../game/progression';
+import { unlockModule } from '../game/unlocks';
 import { cloneBlueprint, createExampleBlueprint, parseBlueprint } from '../state/shipBlueprint';
 
 interface ActiveScene {
@@ -117,6 +118,9 @@ export class App {
         bestEncounterScores: typeof data.bestEncounterScores === 'object' && data.bestEncounterScores
           ? Object.fromEntries(Object.entries(data.bestEncounterScores).map(([key, value]) => [key, Number(value)]))
           : {},
+        unlockedModuleIds: Array.isArray(data.unlockedModuleIds)
+          ? data.unlockedModuleIds.map(String)
+          : [...DEFAULT_PROGRESSION_STATE.unlockedModuleIds],
       };
     } catch {
       return DEFAULT_PROGRESSION_STATE;
@@ -160,6 +164,11 @@ export class App {
       onDeleteFromHangar: (entryId) => {
         this.hangarEntries = removeBlueprintFromHangar(this.hangarEntries, entryId);
         this.persistHangarEntries();
+        this.showEditor();
+      },
+      onUnlockModule: (moduleId) => {
+        this.progression = unlockModule(this.progression, moduleId);
+        this.persistProgression();
         this.showEditor();
       },
       onLaunch: (blueprint, encounterId) => {

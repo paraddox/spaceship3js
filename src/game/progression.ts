@@ -2,6 +2,7 @@ export interface ProgressionState {
   credits: number;
   completedEncounterIds: string[];
   bestEncounterScores: Record<string, number>;
+  unlockedModuleIds: string[];
 }
 
 export interface EncounterReward {
@@ -10,10 +11,13 @@ export interface EncounterReward {
   victory: boolean;
 }
 
+import { DEFAULT_UNLOCKED_MODULE_IDS } from './unlocks';
+
 export const DEFAULT_PROGRESSION_STATE: ProgressionState = {
   credits: 0,
   completedEncounterIds: [],
   bestEncounterScores: {},
+  unlockedModuleIds: [...DEFAULT_UNLOCKED_MODULE_IDS],
 };
 
 export function createEncounterReward(waveCount: number, enemyCount: number, victory: boolean): EncounterReward {
@@ -35,6 +39,7 @@ export function applyEncounterReward(
       ...next.bestEncounterScores,
       [encounterId]: Math.max(next.bestEncounterScores[encounterId] ?? 0, reward.score),
     },
+    unlockedModuleIds: next.unlockedModuleIds,
   };
 }
 
