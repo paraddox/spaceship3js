@@ -33,6 +33,14 @@ describe('encounter presets', () => {
     expect(allEnemyModuleIds).toContain('core:light_drone_bay');
   });
 
+  it('includes explicit objective metadata for presets', () => {
+    const gauntlet = getEncounterPreset('gauntlet');
+    const survival = getEncounterPreset('survival');
+    expect(gauntlet?.objective.type).toBe('eliminate_all');
+    expect(survival?.objective.type).toBe('survive');
+    expect(survival?.objective.durationSeconds).toBeGreaterThan(0);
+  });
+
   it('returns undefined for unknown presets', () => {
     expect(getEncounterPreset('missing-preset')).toBeUndefined();
   });

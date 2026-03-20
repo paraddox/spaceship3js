@@ -236,8 +236,9 @@ export class EditorScene {
         </div>
         <h2>Encounter</h2>
         <div class="encounter-grid">
-          ${ENCOUNTER_PRESETS.map((preset) => `<button class="encounter-button" data-encounter="${preset.id}">${preset.displayName}</button>`).join('')}
+          ${ENCOUNTER_PRESETS.map((preset) => `<button class="encounter-button" data-encounter="${preset.id}" title="${preset.description}">${preset.displayName}</button>`).join('')}
         </div>
+        <div id="encounter-briefing" class="muted"></div>
         <h2>Hangar</h2>
         <div class="toolbar-row">
           <button data-action="save-hangar">Save Current Ship</button>
@@ -394,6 +395,7 @@ export class EditorScene {
     const progressionEl = this.uiRoot.querySelector('#progression-summary');
     const statsEl = this.uiRoot.querySelector('#editor-stats');
     const previewEl = this.uiRoot.querySelector('#editor-preview');
+    const encounterBriefingEl = this.uiRoot.querySelector('#encounter-briefing');
     const validationEl = this.uiRoot.querySelector('#editor-validation');
     const crewEl = this.uiRoot.querySelector('#crew-grid');
     const hangarEl = this.uiRoot.querySelector('#hangar-grid');
@@ -448,6 +450,10 @@ export class EditorScene {
       validationEl.innerHTML = validation.valid
         ? '<span class="success">Launch-ready configuration.</span>'
         : `<span class="warning">${validation.issues.join(' ')}</span>`;
+    }
+    const encounterPreset = ENCOUNTER_PRESETS.find((preset) => preset.id === this.selectedEncounterId);
+    if (encounterBriefingEl && encounterPreset) {
+      encounterBriefingEl.innerHTML = `<strong>${encounterPreset.objective.label}</strong> · ${encounterPreset.description}`;
     }
     if (hangarEl) {
       hangarEl.innerHTML = this.hangarEntries.length === 0

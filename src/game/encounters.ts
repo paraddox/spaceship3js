@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { ShipBlueprint } from '../core/types';
+import type { EncounterObjective } from './objectives';
 import { DEFAULT_CREW_ALLOCATION } from './crew';
 import { createExampleBlueprint } from '../state/shipBlueprint';
 
@@ -21,6 +22,7 @@ export interface EncounterPreset {
   id: string;
   displayName: string;
   description: string;
+  objective: EncounterObjective;
   waves: EncounterWave[];
 }
 
@@ -65,6 +67,7 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
     id: 'gauntlet',
     displayName: 'Frontier Gauntlet',
     description: 'Three escalating combat waves that showcase core sandbox combat.',
+    objective: { type: 'eliminate_all', label: 'Destroy all hostile ships' },
     waves: [
       {
         name: 'Wave 1',
@@ -94,6 +97,7 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
     id: 'duel',
     displayName: 'Captain\'s Duel',
     description: 'A focused one-wave duel against a frigate-class opponent.',
+    objective: { type: 'eliminate_all', label: 'Defeat the enemy flagship' },
     waves: [
       {
         name: 'Duel',
@@ -107,6 +111,7 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
     id: 'survival',
     displayName: 'Survival Scramble',
     description: 'Fast-moving skirmishers with beam and missile pressure.',
+    objective: { type: 'survive', label: 'Survive until rescue arrives', durationSeconds: 45 },
     waves: [
       {
         name: 'Scramble',

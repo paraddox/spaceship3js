@@ -15,6 +15,7 @@ import {
   type DroneTarget,
 } from '../game/drone-runtime';
 import { createEncounterReward, type EncounterReward } from '../game/progression';
+import { evaluateObjective, type EncounterObjective } from '../game/objectives';
 import {
   advanceEncounterState,
   computeCoolingPerSecond,
@@ -106,6 +107,8 @@ export class FlightScene {
   private waveAnnouncement = 'Wave 1 engaged';
   private hasGrantedReward = false;
   private encounterId: string;
+  private encounterObjective!: EncounterObjective;
+  private elapsedEncounterSeconds = 0;
 
   private readonly onKeyDown = (event: KeyboardEvent) => this.keys.add(event.code);
   private readonly onKeyUp = (event: KeyboardEvent) => this.keys.delete(event.code);
@@ -124,7 +127,9 @@ export class FlightScene {
     this.onReward = onReward;
     this.onBack = onBack;
     this.encounterId = encounterId;
-    this.waves = getEncounterPreset(encounterId)?.waves ?? ENCOUNTER_PRESETS[0]?.waves ?? [];
+    const preset = getEncounterPreset(encounterId) ?? ENCOUNTER_PRESETS[0];
+    this.waves = preset?.waves ?? [];
+    this.encounterObjective = preset?.objective ?? { type: 'eliminate_all', label: 'Destroy all hostile ships' };
 
     this.camera.position.set(0, 20, 0.001);
     this.camera.up.set(0, 0, -1);
@@ -144,6 +149,7 @@ export class FlightScene {
   }
 
   update(dt: number): void {
+    this.elapsedEncounterSeconds += dt;
     this.updateWaveDelay(dt);
     this.updatePlayer(dt);
     this.updateEnemies(dt);
@@ -294,6 +300,7 @@ export class FlightScene {
     this.waveDelay = 0;
     this.waveAnnouncement = 'Wave 1 engaged';
     this.hasGrantedReward = false;
+    this.elapsedEncounterSeconds = 0;
 
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
@@ -620,10 +627,35 @@ export class FlightScene {
   }
 
   private updateEncounterState(): void {
+    const remainingEnemies = this.ships.filter((ship) => ship.team === 'enemy' && ship.alive).length;
+
+    if (this.encounterObjective.type === 'survive') {
+      this.encounterOutcome = evaluateObjective(this.encounterObjective, {
+        elapsedSeconds: this.elapsedEncounterSeconds,
+        remainingEnemies,
+        playerAlive: this.player.alive,
+      });
+
+      if (this.encounterOutcome === 'victory') {
+        this.waveAnnouncement = 'Survival objective complete';
+        if (!this.hasGrantedReward) {
+          const totalEnemies = this.waves.reduce((sum, wave) => sum + wave.enemies.length, 0);
+          this.onReward(this.encounterId, createEncounterReward(this.waves.length, totalEnemies, true));
+          this.hasGrantedReward = true;
+        }
+      } else if (this.encounterOutcome === 'defeat') {
+        this.waveAnnouncement = 'Player ship disabled';
+      } else {
+        const remaining = Math.max(0, Math.ceil((this.encounterObjective.durationSeconds ?? 0) - this.elapsedEncounterSeconds));
+        this.waveAnnouncement = `${this.encounterObjective.label} (${remaining}s)`;
+      }
+      return;
+    }
+
     const state: EncounterState = {
       currentWave: this.currentWave,
       totalWaves: this.waves.length,
-      remainingEnemies: this.ships.filter((ship) => ship.team === 'enemy' && ship.alive).length,
+      remainingEnemies,
       playerAlive: this.player.alive,
     };
     const progress = advanceEncounterState(state);
