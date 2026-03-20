@@ -54,6 +54,7 @@ const frigateEnemy: ShipBlueprint = {
     { instanceId: 'hull-f1', definitionId: 'core:hull_2x1', position: { q: -1, r: 0 }, rotation: 0 },
     { instanceId: 'engine-f1', definitionId: 'core:thruster_small', position: { q: 2, r: -1 }, rotation: 0 },
     { instanceId: 'engine-f2', definitionId: 'core:thruster_lateral', position: { q: -2, r: 1 }, rotation: 0 },
+    { instanceId: 'drone-f1', definitionId: 'core:light_drone_bay', position: { q: -1, r: 1 }, rotation: 0 },
     { instanceId: 'weapon-f1', definitionId: 'core:missile_launcher', position: { q: 0, r: -2 }, rotation: 0 },
     { instanceId: 'weapon-f2', definitionId: 'core:laser_light', position: { q: -1, r: -1 }, rotation: 0 },
   ],

@@ -16,12 +16,21 @@ describe('encounter presets', () => {
   });
 
   it('includes a beam-focused enemy somewhere in the catalog', () => {
-    const allEnemyWeaponIds = ENCOUNTER_PRESETS.flatMap((preset) =>
+    const allEnemyModuleIds = ENCOUNTER_PRESETS.flatMap((preset) =>
       preset.waves.flatMap((wave) =>
         wave.enemies.flatMap((enemy) => enemy.blueprint.modules.map((module) => module.definitionId)),
       ),
     );
-    expect(allEnemyWeaponIds).toContain('core:laser_beam_light');
+    expect(allEnemyModuleIds).toContain('core:laser_beam_light');
+  });
+
+  it('includes at least one carrier-style drone encounter', () => {
+    const allEnemyModuleIds = ENCOUNTER_PRESETS.flatMap((preset) =>
+      preset.waves.flatMap((wave) =>
+        wave.enemies.flatMap((enemy) => enemy.blueprint.modules.map((module) => module.definitionId)),
+      ),
+    );
+    expect(allEnemyModuleIds).toContain('core:light_drone_bay');
   });
 
   it('returns undefined for unknown presets', () => {
