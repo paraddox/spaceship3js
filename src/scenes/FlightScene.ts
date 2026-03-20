@@ -6,6 +6,14 @@ import { ENCOUNTER_PRESETS, getEncounterPreset, type EncounterWave } from '../ga
 import { buildShipGroup, computeBlueprintRadius } from '../rendering/shipFactory';
 import { cloneBlueprint, computeShipStats, createExampleBlueprint } from '../state/shipBlueprint';
 import { buildWeaponLoadout, type WeaponProfile } from '../game/weapons';
+import { buildDroneProfiles } from '../game/drones';
+import {
+  advanceDrone,
+  chooseDroneTarget,
+  createDroneInstances,
+  type DroneRuntimeState,
+  type DroneTarget,
+} from '../game/drone-runtime';
 import { createEncounterReward, type EncounterReward } from '../game/progression';
 import {
   advanceEncounterState,
@@ -60,6 +68,12 @@ interface Projectile {
   active: boolean;
 }
 
+interface RuntimeDrone {
+  ownerId: string;
+  mesh: THREE.Mesh;
+  state: DroneRuntimeState;
+}
+
 const PROJECTILE_POOL_SIZE = 96;
 const ARENA_RADIUS = 18;
 const MAX_WORLD_RADIUS = 40;
@@ -78,6 +92,7 @@ export class FlightScene {
   private readonly arenaGroup = new THREE.Group();
   private readonly projectileGroup = new THREE.Group();
   private readonly ships: RuntimeShip[] = [];
+  private readonly drones: RuntimeDrone[] = [];
   private readonly projectiles: Projectile[] = [];
   private readonly keys = new Set<string>();
   private readonly waves: EncounterWave[];
@@ -132,6 +147,7 @@ export class FlightScene {
     this.updateWaveDelay(dt);
     this.updatePlayer(dt);
     this.updateEnemies(dt);
+    this.updateDrones(dt);
     this.updateProjectiles(dt);
     this.coolShips(dt);
     this.updateEncounterState();
@@ -264,7 +280,11 @@ export class FlightScene {
     for (const ship of this.ships) {
       this.scene.remove(ship.group);
     }
+    for (const drone of this.drones) {
+      this.scene.remove(drone.mesh);
+    }
     this.ships.length = 0;
+    this.drones.length = 0;
     for (const projectile of this.projectiles) {
       this.deactivateProjectile(projectile);
     }
@@ -277,6 +297,7 @@ export class FlightScene {
 
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
+    this.spawnDronesForShip(this.player);
     this.spawnWave(1);
   }
 
@@ -285,17 +306,17 @@ export class FlightScene {
     if (!wave) return;
     this.waveAnnouncement = `${wave.name} deployed`;
     for (const enemy of wave.enemies) {
-      this.ships.push(
-        this.createShip(
-          enemy.id,
-          'enemy',
-          cloneBlueprint(enemy.blueprint),
-          enemy.position.clone(),
-          enemy.rotation,
-          enemy.preferredRange,
-          enemy.fireJitter,
-        ),
+      const runtimeShip = this.createShip(
+        enemy.id,
+        'enemy',
+        cloneBlueprint(enemy.blueprint),
+        enemy.position.clone(),
+        enemy.rotation,
+        enemy.preferredRange,
+        enemy.fireJitter,
       );
+      this.ships.push(runtimeShip);
+      this.spawnDronesForShip(runtimeShip);
     }
   }
 
@@ -492,6 +513,51 @@ export class FlightScene {
           break;
         }
       }
+    }
+  }
+
+  private updateDrones(dt: number): void {
+    const targets: DroneTarget[] = this.ships.map((ship) => ({
+      id: ship.id,
+      x: ship.position.x,
+      z: ship.position.z,
+      team: ship.team,
+      alive: ship.alive,
+    }));
+
+    for (const drone of this.drones) {
+      const owner = this.ships.find((ship) => ship.id === drone.ownerId);
+      if (!owner || !owner.alive) {
+        drone.mesh.visible = false;
+        drone.state.active = false;
+        continue;
+      }
+      drone.state = advanceDrone(drone.state, { x: owner.position.x, z: owner.position.z }, dt);
+      drone.mesh.visible = true;
+      drone.mesh.position.set(drone.state.x, 0.35, drone.state.z);
+      const target = chooseDroneTarget(drone.state, targets);
+      if (target && drone.state.cooldown <= 0) {
+        const victim = this.ships.find((ship) => ship.id === target.id && ship.alive);
+        if (victim) {
+          this.applyDamage(victim, drone.state.damage * 0.35);
+          drone.state.cooldown = 1 / drone.state.fireRate;
+          this.waveAnnouncement = `${owner.team === 'player' ? 'Support drones engaging' : 'Enemy drones attacking'}`;
+        }
+      }
+    }
+  }
+
+  private spawnDronesForShip(ship: RuntimeShip): void {
+    const profiles = buildDroneProfiles(ship.blueprint);
+    const instances = createDroneInstances(profiles, { x: ship.position.x, z: ship.position.z }, ship.team);
+    for (const instance of instances) {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.18, 10, 10),
+        new THREE.MeshBasicMaterial({ color: ship.team === 'player' ? '#c084fc' : '#f472b6' }),
+      );
+      mesh.position.set(ship.position.x, 0.35, ship.position.z);
+      this.scene.add(mesh);
+      this.drones.push({ ownerId: ship.id, mesh, state: instance });
     }
   }
 
