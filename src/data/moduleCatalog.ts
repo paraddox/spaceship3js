@@ -164,6 +164,20 @@ export const MODULE_CATALOG: ModuleDefinition[] = [
     color: '#5eead4',
     stats: { damagePerSecond: 24, damageType: 'energy', beamRange: 320, heatPerSecond: 9 },
   },
+  {
+    id: 'core:light_drone_bay',
+    displayName: 'Light Drone Bay',
+    description: 'Launches a pair of light support drones.',
+    category: 'drone_bay',
+    footprint: [{ q: 0, r: 0 }, { q: 0, r: 1 }],
+    mass: 6,
+    maxHp: 90,
+    powerConsumption: 8,
+    heatCapacity: 35,
+    heatDissipation: 0.1,
+    color: '#c084fc',
+    stats: { capacity: 2, launchCooldown: 3.5, droneDamage: 8, droneRange: 260 },
+  },
 ];
 
 export const MODULES_BY_ID = Object.fromEntries(MODULE_CATALOG.map((module) => [module.id, module]));
@@ -174,6 +188,7 @@ export const PALETTE_GROUPS = [
   ['core:reactor_small', 'core:reactor_medium'],
   ['core:thruster_small', 'core:thruster_lateral'],
   ['core:laser_light', 'core:cannon_kinetic', 'core:missile_launcher', 'core:laser_beam_light'],
+  ['core:light_drone_bay'],
 ];
 
 export const EXAMPLE_SCOUT_BLUEPRINT: ShipBlueprint = {

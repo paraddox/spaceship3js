@@ -1,4 +1,4 @@
-export type ModuleCategory = 'bridge' | 'hull' | 'reactor' | 'engine' | 'weapon';
+export type ModuleCategory = 'bridge' | 'hull' | 'reactor' | 'engine' | 'weapon' | 'drone_bay';
 
 export interface HexCoord {
   q: number;
