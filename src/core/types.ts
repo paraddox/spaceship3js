@@ -1,4 +1,4 @@
-export type ModuleCategory = 'bridge' | 'hull' | 'reactor' | 'engine' | 'weapon' | 'drone_bay';
+export type ModuleCategory = 'bridge' | 'hull' | 'reactor' | 'engine' | 'weapon' | 'drone_bay' | 'shield' | 'armor';
 
 export interface HexCoord {
   q: number;
@@ -58,4 +58,7 @@ export interface ShipStats {
   shotsPerSecond: number;
   weaponRange: number;
   heatPerVolley: number;
+  shieldStrength: number;
+  shieldRecharge: number;
+  armorRating: number;
 }

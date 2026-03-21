@@ -178,6 +178,9 @@ export function computeShipStats(blueprint: ShipBlueprint): ShipStats {
     shotsPerSecond: 0,
     weaponRange: 0,
     heatPerVolley: 0,
+    shieldStrength: 0,
+    shieldRecharge: 0,
+    armorRating: 0,
   };
 
   for (const placed of blueprint.modules) {
@@ -205,6 +208,15 @@ export function computeShipStats(blueprint: ShipBlueprint): ShipStats {
     if (def.category === 'drone_bay') {
       stats.droneBayCount += 1;
       stats.droneCapacity += Number(def.stats.capacity ?? 0);
+    }
+
+    if (def.category === 'shield') {
+      stats.shieldStrength += Number(def.stats.shieldStrength ?? 0);
+      stats.shieldRecharge += Number(def.stats.shieldRecharge ?? 0);
+    }
+
+    if (def.category === 'armor') {
+      stats.armorRating += Number(def.stats.armorRating ?? 0);
     }
   }
 

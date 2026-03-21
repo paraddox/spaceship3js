@@ -11,6 +11,7 @@ export interface ObjectiveRuntimeState {
   remainingEnemies: number;
   playerAlive: boolean;
   protectedAlive?: boolean;
+  extractionProgress?: number;
 }
 
 export function evaluateObjective(
@@ -29,7 +30,10 @@ export function evaluateObjective(
     if (state.protectedAlive === false) {
       return 'defeat';
     }
-    return state.remainingEnemies <= 0 ? 'victory' : 'continue';
+    if (state.remainingEnemies > 0) {
+      return 'continue';
+    }
+    return (state.extractionProgress ?? 0) >= 1 ? 'victory' : 'continue';
   }
 
   return state.remainingEnemies <= 0 ? 'victory' : 'continue';

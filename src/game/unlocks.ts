@@ -12,11 +12,15 @@ export const MODULE_UNLOCK_COSTS: Record<string, number> = {
   'core:bridge_frigate': 220,
   'core:hull_2x1': 90,
   'core:reactor_medium': 180,
+  'core:reactor_large': 400,
   'core:thruster_lateral': 120,
   'core:cannon_kinetic': 110,
+  'core:cannon_heavy': 350,
   'core:missile_launcher': 260,
   'core:laser_beam_light': 240,
   'core:light_drone_bay': 300,
+  'core:shield_generator': 280,
+  'core:armor_plating': 150,
 };
 
 export function isModuleUnlocked(state: ProgressionState, moduleId: string): boolean {

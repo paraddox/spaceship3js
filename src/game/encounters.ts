@@ -149,6 +149,14 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
           { id: 'escort-2', blueprint: beamEnemy, position: new THREE.Vector3(10, 0, -7), rotation: -0.15, preferredRange: 8.5, fireJitter: 0.2 },
         ],
       },
+      {
+        name: 'Reinforcements',
+        enemies: [
+          { id: 'escort-3', blueprint: missileEnemy, position: new THREE.Vector3(-6, 0, -12), rotation: 0.1, preferredRange: 10, fireJitter: 0.4 },
+          { id: 'escort-4', blueprint: waveOneEnemy, position: new THREE.Vector3(8, 0, -11), rotation: -0.1, preferredRange: 8, fireJitter: 0.3 },
+          { id: 'escort-5', blueprint: beamEnemy, position: new THREE.Vector3(0, 0, -13), rotation: 0.0, preferredRange: 7.5, fireJitter: 0.15 },
+        ],
+      },
     ],
   },
 ];

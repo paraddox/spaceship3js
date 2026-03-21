@@ -10,6 +10,8 @@ const CATEGORY_HEIGHT: Record<ModuleCategory, number> = {
   engine: HEX_HEIGHT * 0.95,
   weapon: HEX_HEIGHT * 1.35,
   drone_bay: HEX_HEIGHT * 1.2,
+  shield: HEX_HEIGHT * 1.3,
+  armor: HEX_HEIGHT * 0.85,
 };
 
 const hexGeometry = new THREE.CylinderGeometry(HEX_SIZE * 0.96, HEX_SIZE * 0.96, 1, 6);

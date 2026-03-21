@@ -29,6 +29,16 @@ describe('encounter objectives', () => {
 
   it('wins protect-ally objectives once hostiles are cleared and the ally survives', () => {
     const objective: EncounterObjective = { type: 'protect_ally', label: 'Protect the convoy ship' };
-    expect(evaluateObjective(objective, { elapsedSeconds: 30, remainingEnemies: 0, playerAlive: true, protectedAlive: true })).toBe('victory');
+    expect(evaluateObjective(objective, { elapsedSeconds: 30, remainingEnemies: 0, playerAlive: true, protectedAlive: true, extractionProgress: 1 })).toBe('victory');
+  });
+
+  it('keeps protect-ally objectives running while hostiles remain even if extraction is near', () => {
+    const objective: EncounterObjective = { type: 'protect_ally', label: 'Protect the convoy ship' };
+    expect(evaluateObjective(objective, { elapsedSeconds: 30, remainingEnemies: 2, playerAlive: true, protectedAlive: true, extractionProgress: 0.9 })).toBe('continue');
+  });
+
+  it('keeps protect-ally objectives running until extraction completes after hostiles are cleared', () => {
+    const objective: EncounterObjective = { type: 'protect_ally', label: 'Protect the convoy ship' };
+    expect(evaluateObjective(objective, { elapsedSeconds: 30, remainingEnemies: 0, playerAlive: true, protectedAlive: true, extractionProgress: 0.5 })).toBe('continue');
   });
 });
