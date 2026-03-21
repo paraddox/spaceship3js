@@ -20,7 +20,9 @@ import { createEncounterReward, type EncounterReward } from '../game/progression
 import { evaluateObjective, type EncounterObjective } from '../game/objectives';
 import { computeProjectileSpawnPosition } from '../game/projectiles';
 import { buildEncounterDebrief } from '../game/debrief';
+import { advanceProtectedAlly, chooseEnemyPriorityTarget, computeEscortProgress } from '../game/escort-ai';
 import { advanceEffect, createBeamEffect, createExplosionEffect, createImpactEffect, type CombatEffectState } from '../game/effects';
+import { playShoot, playLaser, playHit, playExplosion, playMissile, playBeam, resumeAudio } from '../game/audio';
 import {
   advanceEncounterState,
   computeCoolingPerSecond,
@@ -47,6 +49,7 @@ interface RuntimeShip {
   blueprint: ShipBlueprint;
   stats: ShipStats;
   protectedTarget?: boolean;
+  escortOrigin?: THREE.Vector3;
   weapons: WeaponProfile[];
   weaponIndex: number;
   group: THREE.Group;
@@ -90,6 +93,7 @@ const PROJECTILE_POOL_SIZE = 96;
 const ARENA_RADIUS = 18;
 const MAX_WORLD_RADIUS = 40;
 const WAVE_RESPAWN_DELAY = 1.6;
+const ESCORT_EXTRACTION_POINT = new THREE.Vector3(0, 0, -14);
 
 export class FlightScene {
   private readonly renderer: THREE.WebGLRenderer;
@@ -104,6 +108,8 @@ export class FlightScene {
   private readonly arenaGroup = new THREE.Group();
   private readonly projectileGroup = new THREE.Group();
   private readonly effectGroup = new THREE.Group();
+  private readonly healthBarGroup = new THREE.Group();
+  private readonly shipHealthBars = new Map<string, { bg: THREE.Mesh; fg: THREE.Mesh }>();
   private readonly ships: RuntimeShip[] = [];
   private readonly drones: RuntimeDrone[] = [];
   private readonly projectiles: Projectile[] = [];
@@ -123,10 +129,14 @@ export class FlightScene {
   private encounterObjective!: EncounterObjective;
   private elapsedEncounterSeconds = 0;
 
-  private readonly onKeyDown = (event: KeyboardEvent) => this.keys.add(event.code);
+  private readonly onKeyDown = (event: KeyboardEvent) => {
+    resumeAudio();
+    this.keys.add(event.code);
+  };
   private readonly onKeyUp = (event: KeyboardEvent) => this.keys.delete(event.code);
   private readonly onPointerMove = (event: PointerEvent) => this.updateMouseWorld(event);
   private readonly onPointerDown = (event: PointerEvent) => {
+    resumeAudio();
     if (event.button === 0) this.fireHeld = true;
     this.updateMouseWorld(event);
   };
@@ -152,7 +162,7 @@ export class FlightScene {
     const ambient = new THREE.AmbientLight(0xffffff, 1.2);
     const rim = new THREE.DirectionalLight(0xbfe1ff, 1.1);
     rim.position.set(8, 10, 6);
-    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup);
+    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup, this.healthBarGroup);
 
     this.buildArena();
     this.buildProjectiles();
@@ -163,13 +173,16 @@ export class FlightScene {
 
   update(dt: number): void {
     this.elapsedEncounterSeconds += dt;
+    this.updateCameraFollow(dt);
     this.updateWaveDelay(dt);
     this.updatePlayer(dt);
+    this.updateProtectedAllies(dt);
     this.updateEnemies(dt);
     this.updateDrones(dt);
     this.updateProjectiles(dt);
     this.updateEffects(dt);
     this.coolShips(dt);
+    this.updateHealthBars();
     this.updateEncounterState();
     this.refreshHud();
     this.renderer.render(this.scene, this.camera);
@@ -256,6 +269,29 @@ export class FlightScene {
     );
     this.arenaGroup.add(ring);
 
+    if (this.encounterObjective.type === 'protect_ally') {
+      const extractionRing = new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints(
+          Array.from({ length: 32 }, (_, i) => {
+            const angle = (i / 32) * Math.PI * 2;
+            return new THREE.Vector3(
+              ESCORT_EXTRACTION_POINT.x + Math.cos(angle) * 1.35,
+              0.03,
+              ESCORT_EXTRACTION_POINT.z + Math.sin(angle) * 1.35,
+            );
+          }),
+        ),
+        new THREE.LineBasicMaterial({ color: '#67e8f9' }),
+      );
+      const extractionPad = new THREE.Mesh(
+        new THREE.CircleGeometry(1.1, 24),
+        new THREE.MeshBasicMaterial({ color: '#155e75', transparent: true, opacity: 0.28 }),
+      );
+      extractionPad.rotation.x = -Math.PI / 2;
+      extractionPad.position.copy(ESCORT_EXTRACTION_POINT).setY(0.02);
+      this.arenaGroup.add(extractionPad, extractionRing);
+    }
+
     const stars = new THREE.Points(
       new THREE.BufferGeometry().setAttribute(
         'position',
@@ -310,6 +346,7 @@ export class FlightScene {
     this.ships.length = 0;
     this.drones.length = 0;
     this.effects.length = 0;
+    this.clearHealthBars();
     for (const projectile of this.projectiles) {
       this.deactivateProjectile(projectile);
     }
@@ -363,7 +400,7 @@ export class FlightScene {
     fireJitter: number,
     protectedTarget = false,
   ): RuntimeShip {
-    const group = buildShipGroup(blueprint);
+    const group = buildShipGroup(blueprint, 1, team);
     group.position.copy(position);
     group.rotation.y = rotation;
     this.scene.add(group);
@@ -376,6 +413,7 @@ export class FlightScene {
       blueprint,
       stats,
       protectedTarget,
+      escortOrigin: protectedTarget ? position.clone() : undefined,
       weapons,
       weaponIndex: 0,
       group,
@@ -427,13 +465,40 @@ export class FlightScene {
     this.syncShipTransform(this.player);
   }
 
+  private updateProtectedAllies(dt: number): void {
+    for (const ally of this.ships.filter((ship) => ship.protectedTarget && ship.alive)) {
+      const next = advanceProtectedAlly(
+        {
+          x: ally.position.x,
+          z: ally.position.z,
+          speed: Math.max(1.8, ally.stats.thrust / 120),
+        },
+        {
+          x: ESCORT_EXTRACTION_POINT.x,
+          z: ESCORT_EXTRACTION_POINT.z,
+        },
+        dt,
+      );
+
+      const movement = new THREE.Vector3(next.x - ally.position.x, 0, next.z - ally.position.z);
+      ally.position.set(next.x, ally.position.y, next.z);
+      ally.velocity.copy(movement.multiplyScalar(1 / Math.max(dt, 0.001)));
+      if (ally.velocity.lengthSq() > 0.0001) {
+        ally.rotation = lerpAngle(ally.rotation, Math.atan2(ally.velocity.x, ally.velocity.z), Math.min(1, dt * 4));
+      }
+      this.clampToArena(ally.position);
+      this.syncShipTransform(ally);
+    }
+  }
+
   private updateEnemies(dt: number): void {
     for (const enemy of this.ships.filter((ship) => ship.team === 'enemy' && ship.alive)) {
-      const toPlayer = this.player.position.clone().sub(enemy.position);
-      const distance = toPlayer.length();
-      const direction = toPlayer.normalize();
+      const target = this.getEnemyPriorityTarget(enemy);
+      const toTarget = target.position.clone().sub(enemy.position);
+      const distance = toTarget.length();
+      const direction = toTarget.normalize();
       const side = new THREE.Vector3(-direction.z, 0, direction.x);
-      const targetRotation = Math.atan2(this.player.position.x - enemy.position.x, this.player.position.z - enemy.position.z);
+      const targetRotation = Math.atan2(target.position.x - enemy.position.x, target.position.z - enemy.position.z);
       enemy.rotation = lerpAngle(enemy.rotation, targetRotation, Math.min(1, dt * 4));
 
       const rangeError = distance - enemy.preferredRange;
@@ -458,7 +523,7 @@ export class FlightScene {
           0,
           (Math.random() - 0.5) * enemy.fireJitter,
         );
-        this.tryFire(enemy, this.player.position.clone().add(jitter).sub(enemy.position).normalize());
+        this.tryFire(enemy, target.position.clone().add(jitter).sub(enemy.position).normalize());
       }
 
       this.syncShipTransform(enemy);
@@ -487,6 +552,7 @@ export class FlightScene {
 
     if (weapon.archetype === 'beam') {
       this.fireBeam(ship, normalizedDirection, weapon, damage);
+      playBeam();
       ship.cooldown = weapon.cooldown;
       ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + weapon.heat);
       return;
@@ -515,6 +581,9 @@ export class FlightScene {
 
     ship.cooldown = 1 / effectiveCadence;
     ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + weapon.heat);
+    if (weapon.archetype === 'missile') playMissile();
+    else if (weapon.archetype === 'laser') playLaser();
+    else playShoot();
   }
 
   private updateProjectiles(dt: number): void {
@@ -656,12 +725,41 @@ export class FlightScene {
   private applyDamage(ship: RuntimeShip, damage: number): void {
     ship.hp -= damage;
     ship.heat = Math.min(ship.stats.heatCapacity * 1.25, ship.heat + damage * 0.08);
+    playHit();
     this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185');
     if (ship.hp <= 0) {
       ship.alive = false;
       ship.group.visible = false;
+      playExplosion();
       this.spawnExplosionVisual(ship.position, ship.team === 'player' ? '#fca5a5' : '#fb7185');
     }
+  }
+
+  private getProtectedAlly(): RuntimeShip | null {
+    return this.ships.find((ship) => ship.protectedTarget && ship.alive) ?? null;
+  }
+
+  private getProtectedEscortProgress(): number {
+    const ally = this.getProtectedAlly();
+    if (!ally?.escortOrigin) {
+      return 0;
+    }
+
+    return computeEscortProgress(
+      { x: ally.escortOrigin.x, z: ally.escortOrigin.z },
+      { x: ally.position.x, z: ally.position.z },
+      { x: ESCORT_EXTRACTION_POINT.x, z: ESCORT_EXTRACTION_POINT.z },
+    );
+  }
+
+  private getEnemyPriorityTarget(enemy: RuntimeShip): RuntimeShip {
+    const protectedAlly = this.getProtectedAlly();
+    const target = chooseEnemyPriorityTarget(
+      { x: enemy.position.x, z: enemy.position.z },
+      { id: this.player.id, x: this.player.position.x, z: this.player.position.z },
+      protectedAlly ? { id: protectedAlly.id, x: protectedAlly.position.x, z: protectedAlly.position.z } : null,
+    );
+    return target.id === this.player.id ? this.player : protectedAlly ?? this.player;
   }
 
   private findNearestEnemy(source: RuntimeShip): RuntimeShip | null {
@@ -754,6 +852,7 @@ export class FlightScene {
   private updateEncounterState(): void {
     const remainingEnemies = this.ships.filter((ship) => ship.team === 'enemy' && ship.alive).length;
     const protectedAlive = this.ships.every((ship) => !ship.protectedTarget || ship.alive);
+    const convoyProgress = this.getProtectedEscortProgress();
 
     if (this.encounterObjective.type === 'survive' || this.encounterObjective.type === 'protect_ally') {
       this.encounterOutcome = evaluateObjective(this.encounterObjective, {
@@ -761,12 +860,13 @@ export class FlightScene {
         remainingEnemies,
         playerAlive: this.player.alive,
         protectedAlive,
+        extractionProgress: convoyProgress,
       });
 
       if (this.encounterOutcome === 'victory') {
         this.waveAnnouncement = this.encounterObjective.type === 'survive'
           ? 'Survival objective complete'
-          : 'Convoy secured';
+          : `Convoy secured · extraction ${(convoyProgress * 100).toFixed(0)}%`;
         if (!this.hasGrantedReward) {
           const totalEnemies = this.waves.reduce((sum, wave) => sum + wave.enemies.length, 0);
           this.onReward(this.encounterId, createEncounterReward(this.waves.length, totalEnemies, true));
@@ -779,8 +879,27 @@ export class FlightScene {
       } else if (this.encounterObjective.type === 'survive') {
         const remaining = Math.max(0, Math.ceil((this.encounterObjective.durationSeconds ?? 0) - this.elapsedEncounterSeconds));
         this.waveAnnouncement = `${this.encounterObjective.label} (${remaining}s)`;
-      } else {
-        this.waveAnnouncement = `${this.encounterObjective.label} · hostiles remaining ${remainingEnemies}`;
+      } else if (this.encounterObjective.type === 'protect_ally') {
+        if (remainingEnemies <= 0) {
+          this.waveAnnouncement = `Hostiles cleared · escort the convoy to extraction (${(convoyProgress * 100).toFixed(0)}%)`;
+        } else {
+          this.waveAnnouncement = `${this.encounterObjective.label} · convoy ${(convoyProgress * 100).toFixed(0)}% · hostiles ${remainingEnemies}`;
+        }
+      }
+
+      if (this.encounterObjective.type === 'protect_ally' && this.encounterOutcome === 'continue') {
+        const waveState: EncounterState = {
+          currentWave: this.currentWave,
+          totalWaves: this.waves.length,
+          remainingEnemies,
+          playerAlive: this.player.alive,
+        };
+        const waveProgress = advanceEncounterState(waveState);
+        if (waveProgress.shouldSpawnWave && this.waveDelay <= 0) {
+          this.currentWave = waveProgress.nextWave;
+          this.waveDelay = WAVE_RESPAWN_DELAY;
+          this.waveAnnouncement = `${this.waves[this.currentWave - 1]?.name ?? 'Wave'} incoming...`;
+        }
       }
       return;
     }
@@ -832,6 +951,79 @@ export class FlightScene {
     ship.group.rotation.y = ship.rotation;
   }
 
+  private updateCameraFollow(dt: number): void {
+    const target = new THREE.Vector3(
+      this.player.position.x,
+      20,
+      this.player.position.z + 0.001,
+    );
+    this.camera.position.lerp(target, Math.min(1, dt * 5));
+    const lookTarget = new THREE.Vector3(
+      this.player.position.x,
+      0,
+      this.player.position.z,
+    );
+    this.camera.lookAt(lookTarget);
+  }
+
+  private ensureHealthBar(ship: RuntimeShip): { bg: THREE.Mesh; fg: THREE.Mesh } {
+    let bar = this.shipHealthBars.get(ship.id);
+    if (bar) return bar;
+    const barWidth = ship.radius * 1.6;
+    const barHeight = 0.28;
+    const bg = new THREE.Mesh(
+      new THREE.PlaneGeometry(barWidth, barHeight),
+      new THREE.MeshBasicMaterial({ color: '#1e293b', transparent: true, opacity: 0.85 }),
+    );
+    bg.rotation.x = -Math.PI / 2;
+    const fg = new THREE.Mesh(
+      new THREE.PlaneGeometry(barWidth, barHeight),
+      new THREE.MeshBasicMaterial({ color: ship.team === 'player' ? '#4ade80' : '#f87171' }),
+    );
+    fg.rotation.x = -Math.PI / 2;
+    this.healthBarGroup.add(bg, fg);
+    bar = { bg, fg };
+    this.shipHealthBars.set(ship.id, bar);
+    return bar;
+  }
+
+  private updateHealthBars(): void {
+    for (const ship of this.ships) {
+      if (!ship.alive) {
+        const existing = this.shipHealthBars.get(ship.id);
+        if (existing) {
+          this.healthBarGroup.remove(existing.bg, existing.fg);
+          existing.bg.geometry.dispose();
+          existing.fg.geometry.dispose();
+          this.shipHealthBars.delete(ship.id);
+        }
+        continue;
+      }
+      const bar = this.ensureHealthBar(ship);
+      const y = ship.position.y + ship.radius + 0.8;
+      bar.bg.position.set(ship.position.x, y, ship.position.z);
+      const barWidth = ship.radius * 1.6;
+      const hpRatio = Math.max(0, ship.hp) / Math.max(1, ship.stats.maxHp);
+      const halfFilled = (barWidth * hpRatio) / 2;
+      bar.fg.position.set(
+        ship.position.x - barWidth / 2 + halfFilled,
+        y + 0.01,
+        ship.position.z,
+      );
+      bar.fg.scale.x = hpRatio;
+    }
+  }
+
+  private clearHealthBars(): void {
+    for (const pair of Array.from(this.shipHealthBars.entries())) {
+      const bar = pair[1];
+      this.healthBarGroup.remove(bar.bg, bar.fg);
+      bar.bg.geometry.dispose();
+      bar.fg.geometry.dispose();
+    }
+    this.shipHealthBars.clear();
+  }
+
   private clampToArena(position: THREE.Vector3): void {
     if (position.length() <= ARENA_RADIUS - 1) return;
     position.setLength(ARENA_RADIUS - 1);
@@ -842,6 +1034,8 @@ export class FlightScene {
     const debrief = this.uiRoot.querySelector('#flight-debrief');
     if (!hud) return;
     const enemiesAlive = this.ships.filter((ship) => ship.team === 'enemy' && ship.alive).length;
+    const protectedAlly = this.getProtectedAlly();
+    const convoyProgress = this.getProtectedEscortProgress();
     const hpRatio = Math.max(0, this.player.hp) / Math.max(1, this.player.stats.maxHp);
     const heatRatio = this.player.heat / Math.max(1, this.player.stats.heatCapacity * 1.15);
     const overheatState = isOverheated(this.player.heat, this.player.stats.heatCapacity * 1.02);
@@ -850,6 +1044,9 @@ export class FlightScene {
       .join(' ');
     const activeDrones = this.drones.filter((drone) => drone.state.team === 'player' && drone.state.active).length;
     const totalDrones = this.player.stats.droneCapacity;
+    const convoyStatus = protectedAlly
+      ? `${Math.max(0, protectedAlly.hp).toFixed(0)} / ${protectedAlly.stats.maxHp.toFixed(0)}`
+      : 'N/A';
 
     hud.innerHTML = `
       <div class="hud-grid">
@@ -862,10 +1059,13 @@ export class FlightScene {
         <div><span>Enemies</span><strong>${enemiesAlive}</strong></div>
         <div><span>Status</span><strong>${overheatState ? 'Overheated' : 'Nominal'}</strong></div>
         <div><span>Drones</span><strong>${activeDrones} / ${totalDrones}</strong></div>
+        ${this.encounterObjective.type === 'protect_ally' ? `<div><span>Convoy Hull</span><strong>${convoyStatus}</strong></div>` : ''}
+        ${this.encounterObjective.type === 'protect_ally' ? `<div><span>Convoy Progress</span><strong>${(convoyProgress * 100).toFixed(0)}%</strong></div>` : ''}
       </div>
       <p class="muted">Crew ${crewSummary}</p>
       <div class="meter"><span style="width:${hpRatio * 100}%"></span></div>
       <div class="meter heat"><span style="width:${Math.min(100, heatRatio * 100)}%"></span></div>
+      ${this.encounterObjective.type === 'protect_ally' ? `<div class="meter"><span style="width:${Math.min(100, convoyProgress * 100)}%; background:linear-gradient(90deg,#67e8f9,#22d3ee)"></span></div>` : ''}
       <p class="muted">${this.encounterObjective.label}</p>
       <p class="muted">${this.waveAnnouncement}</p>
       ${!this.player.alive ? '<p class="warning">Your ship is disabled. Reset or return to the editor.</p>' : ''}
@@ -903,57 +1103,4 @@ function getProjectileColor(team: 'player' | 'enemy', archetype: WeaponProfile['
   if (archetype === 'laser') return team === 'player' ? '#7dd3fc' : '#f9a8d4';
   if (archetype === 'beam') return team === 'player' ? '#5eead4' : '#fca5a5';
   return team === 'player' ? '#fde68a' : '#fecaca';
-}
-
-function createWaveConfigs(): EncounterWave[] {
-  const waveOneEnemy = createExampleBlueprint();
-  waveOneEnemy.name = 'Red Aggressor';
-  waveOneEnemy.modules = waveOneEnemy.modules.map((module, index) =>
-    index === waveOneEnemy.modules.length - 1 ? { ...module, definitionId: 'core:cannon_kinetic' } : module,
-  );
-
-  const missileEnemy = createExampleBlueprint();
-  missileEnemy.name = 'Missile Hunter';
-  missileEnemy.modules = missileEnemy.modules.map((module, index) =>
-    index === missileEnemy.modules.length - 1 ? { ...module, definitionId: 'core:missile_launcher' } : module,
-  );
-
-  const frigateEnemy: ShipBlueprint = {
-    name: 'Frigate Spearhead',
-    crew: { ...DEFAULT_CREW_ALLOCATION, gunner: 2, tactician: 2 },
-    modules: [
-      { instanceId: 'bridge-f', definitionId: 'core:bridge_frigate', position: { q: 0, r: 0 }, rotation: 0 },
-      { instanceId: 'reactor-f1', definitionId: 'core:reactor_medium', position: { q: 1, r: 0 }, rotation: 0 },
-      { instanceId: 'hull-f1', definitionId: 'core:hull_2x1', position: { q: -1, r: 0 }, rotation: 0 },
-      { instanceId: 'engine-f1', definitionId: 'core:thruster_small', position: { q: 2, r: -1 }, rotation: 0 },
-      { instanceId: 'engine-f2', definitionId: 'core:thruster_lateral', position: { q: -2, r: 1 }, rotation: 0 },
-      { instanceId: 'weapon-f1', definitionId: 'core:missile_launcher', position: { q: 0, r: -2 }, rotation: 0 },
-      { instanceId: 'weapon-f2', definitionId: 'core:laser_light', position: { q: -1, r: -1 }, rotation: 0 },
-    ],
-  };
-
-  return [
-    {
-      name: 'Wave 1',
-      enemies: [
-        { id: 'enemy-1', blueprint: waveOneEnemy, position: new THREE.Vector3(-8, 0, -8), rotation: 0.3, preferredRange: 9, fireJitter: 0.35 },
-        { id: 'enemy-2', blueprint: missileEnemy, position: new THREE.Vector3(8, 0, -10), rotation: -0.2, preferredRange: 11, fireJitter: 0.55 },
-      ],
-    },
-    {
-      name: 'Wave 2',
-      enemies: [
-        { id: 'enemy-3', blueprint: waveOneEnemy, position: new THREE.Vector3(-11, 0, -6), rotation: 0.1, preferredRange: 8, fireJitter: 0.3 },
-        { id: 'enemy-4', blueprint: waveOneEnemy, position: new THREE.Vector3(0, 0, -12), rotation: 0.0, preferredRange: 8.5, fireJitter: 0.25 },
-        { id: 'enemy-5', blueprint: missileEnemy, position: new THREE.Vector3(11, 0, -6), rotation: -0.1, preferredRange: 12, fireJitter: 0.5 },
-      ],
-    },
-    {
-      name: 'Wave 3',
-      enemies: [
-        { id: 'enemy-6', blueprint: frigateEnemy, position: new THREE.Vector3(0, 0, -12), rotation: 0.0, preferredRange: 10, fireJitter: 0.3 },
-        { id: 'enemy-7', blueprint: missileEnemy, position: new THREE.Vector3(-10, 0, -11), rotation: 0.2, preferredRange: 12, fireJitter: 0.55 },
-      ],
-    },
-  ];
 }

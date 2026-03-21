@@ -18,6 +18,13 @@ hexGeometry.rotateY(Math.PI / 6);
 const edgeGeometry = new THREE.EdgesGeometry(new THREE.CylinderGeometry(HEX_SIZE * 0.98, HEX_SIZE * 0.98, 1, 6));
 edgeGeometry.rotateY(Math.PI / 6);
 
+function tintEnemy(color: string): string {
+  const c = new THREE.Color(color);
+  const red = new THREE.Color('#ff4444');
+  c.lerp(red, 0.4);
+  return '#' + c.getHexString();
+}
+
 function makeMaterial(color: string, opacity = 1): THREE.MeshStandardMaterial {
   return new THREE.MeshStandardMaterial({
     color,
@@ -29,18 +36,19 @@ function makeMaterial(color: string, opacity = 1): THREE.MeshStandardMaterial {
   });
 }
 
-export function buildShipGroup(blueprint: ShipBlueprint, opacity = 1): THREE.Group {
+export function buildShipGroup(blueprint: ShipBlueprint, opacity = 1, team?: 'player' | 'enemy'): THREE.Group {
   const group = new THREE.Group();
 
   for (const placed of blueprint.modules) {
     const definition = getModuleDefinition(placed.definitionId);
     const transformed = transformFootprint(definition.footprint, placed.rotation);
     const height = CATEGORY_HEIGHT[definition.category];
+    const color = team === 'enemy' ? tintEnemy(definition.color) : definition.color;
 
     for (const localHex of transformed) {
       const worldHex = { q: placed.position.q + localHex.q, r: placed.position.r + localHex.r };
       const basePosition = hexToWorld(worldHex);
-      const mesh = new THREE.Mesh(hexGeometry, makeMaterial(definition.color, opacity));
+      const mesh = new THREE.Mesh(hexGeometry, makeMaterial(color, opacity));
       mesh.scale.y = height;
       mesh.position.set(basePosition.x, height / 2, basePosition.z);
       mesh.castShadow = true;

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { HEX_HEIGHT, HEX_SIZE, generateHexRing, hexKey, hexToWorld, normalizeRotation, worldToHex } from '../core/hex';
-import type { CrewAllocation, HexCoord, ShipBlueprint } from '../core/types';
+import type { CrewAllocation, HexCoord, ModuleDefinition, ShipBlueprint } from '../core/types';
 import type { ProgressionState } from '../game/progression';
 import { DEFAULT_CREW_ALLOCATION, applyCrewModifiers } from '../game/crew';
 import { ENCOUNTER_PRESETS } from '../game/encounters';
@@ -219,6 +219,9 @@ export class EditorScene {
       <div class="overlay top-left panel editor-panel">
         <h1>Spachip3JS</h1>
         <p class="muted">Godot spaceship plan translated into a browser-friendly editor + flight sandbox.</p>
+        <div class="toolbar-row">
+          <label class="rename-label">Ship name: <input id="ship-name-input" type="text" value="${escapeHtml(this.blueprint.name)}" maxlength="32" /></label>
+        </div>
         <div id="progression-summary" class="progression-summary"></div>
         <div id="editor-stats" class="stats-grid"></div>
         <h2>Crew Assignments</h2>
@@ -250,9 +253,10 @@ export class EditorScene {
             const def = getModuleDefinition(id);
             const unlocked = isModuleUnlocked(this.progression, id);
             const cost = MODULE_UNLOCK_COSTS[id] ?? 0;
+            const tooltip = formatModuleTooltip(def);
             return unlocked
-              ? `<button class="module-button" data-module="${id}">${def.displayName}</button>`
-              : `<button class="module-button locked" data-unlock-module="${id}" title="Unlock for ${cost} credits">🔒 ${def.displayName} (${cost})</button>`;
+              ? `<button class="module-button" data-module="${id}" title="${tooltip}">${def.displayName}</button>`
+              : `<button class="module-button locked" data-unlock-module="${id}" title="Unlock for ${cost} credits — ${tooltip}">🔒 ${def.displayName} (${cost})</button>`;
           }).join('')}
         </div>
         <div id="editor-preview" class="muted"></div>
@@ -350,12 +354,22 @@ export class EditorScene {
         const role = button.dataset.crewRole as keyof CrewAllocation | undefined;
         const delta = Number(button.dataset.crewDelta ?? 0);
         if (!role || !delta) return;
-        const nextCrew: CrewAllocation = { ...this.blueprint.crew, [role]: Math.max(0, this.blueprint.crew[role] + delta) };
+        const MAX_CREW = 5;
+        const nextCrew: CrewAllocation = { ...this.blueprint.crew, [role]: Math.max(0, Math.min(MAX_CREW, this.blueprint.crew[role] + delta)) };
         this.blueprint = setCrewAllocation(this.blueprint, nextCrew);
         this.onBlueprintChange(cloneBlueprint(this.blueprint));
         this.refreshInfo();
       });
     });
+
+    const nameInput = this.uiRoot.querySelector<HTMLInputElement>('#ship-name-input');
+    if (nameInput) {
+      nameInput.addEventListener('change', () => {
+        const name = nameInput.value.trim() || 'Unnamed Ship';
+        this.blueprint = { ...this.blueprint, name };
+        this.onBlueprintChange(cloneBlueprint(this.blueprint));
+      });
+    }
   }
 
   private refreshScene(): void {
@@ -436,7 +450,8 @@ export class EditorScene {
           const role = button.dataset.crewRole as keyof CrewAllocation | undefined;
           const delta = Number(button.dataset.crewDelta ?? 0);
           if (!role || !delta) return;
-          const nextCrew: CrewAllocation = { ...this.blueprint.crew, [role]: Math.max(0, this.blueprint.crew[role] + delta) };
+          const MAX_CREW = 5;
+          const nextCrew: CrewAllocation = { ...this.blueprint.crew, [role]: Math.max(0, Math.min(MAX_CREW, this.blueprint.crew[role] + delta)) };
           this.blueprint = setCrewAllocation(this.blueprint, nextCrew);
           this.onBlueprintChange(cloneBlueprint(this.blueprint));
           this.refreshInfo();
@@ -508,4 +523,20 @@ export class EditorScene {
 
 function capitalizeRole(role: string): string {
   return role.charAt(0).toUpperCase() + role.slice(1);
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function formatModuleTooltip(def: ModuleDefinition): string {
+  const parts: string[] = [`Category: ${def.category}`, `Mass: ${def.mass}`, `HP: ${def.maxHp}`];
+  if (def.powerOutput) parts.push(`Power +${def.powerOutput}`);
+  if (def.powerConsumption) parts.push(`Power -${def.powerConsumption}`);
+  if (def.heatCapacity) parts.push(`Heat cap: ${def.heatCapacity}`);
+  if (def.heatDissipation) parts.push(`Cooling: ${def.heatDissipation}/s`);
+  for (const [key, value] of Object.entries(def.stats)) {
+    parts.push(`${key}: ${value}`);
+  }
+  return `${def.description} — ${parts.join(' | ')}`;
 }

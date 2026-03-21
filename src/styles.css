@@ -134,6 +134,30 @@ button.primary:hover { filter: brightness(1.08); }
   background: rgba(14, 165, 233, 0.18);
 }
 
+.rename-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.95rem;
+  width: 100%;
+}
+
+.rename-label input {
+  flex: 1;
+  background: rgba(30, 41, 59, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 6px 10px;
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+
+.rename-label input:focus {
+  outline: none;
+  border-color: #38bdf8;
+}
+
 .stats-grid,
 .hud-grid {
   display: grid;
