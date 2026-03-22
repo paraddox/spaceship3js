@@ -273,6 +273,22 @@ export class ParticleSystem {
     };
   }
 
+  /** Burst of energy when player activates dash */
+  static dashBurst(position: THREE.Vector3): ParticleConfig {
+    return {
+      position: position.clone().setY(0.2),
+      count: 20,
+      speed: [2, 6],
+      life: [0.1, 0.25],
+      startScale: [0.3, 0.6],
+      endScale: [0.05, 0.15],
+      startOpacity: 0.9,
+      endOpacity: 0,
+      color: '#38bdf8',
+      drag: 4,
+    };
+  }
+
   static thrustTrail(position: THREE.Vector3, direction: THREE.Vector3, isAfterburning = false): ParticleConfig {
     return {
       position: position.clone().setY(0.15),

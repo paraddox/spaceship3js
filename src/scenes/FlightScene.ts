@@ -100,6 +100,16 @@ import {
   type PurchasedUpgrade,
   type LiveUpgradeStats,
 } from '../game/upgrade-shop';
+import {
+  createDashState,
+  canDash,
+  startDash,
+  updateDash,
+  isInvulnerable,
+  isDashing,
+  getDashProgress,
+  type DashState,
+} from '../game/dash';
 
 const REPAIR_HP_FRACTION = 0.75;
 
@@ -237,6 +247,7 @@ export class FlightScene {
   private readonly pickups: PickupState[] = [];
   private readonly pickupMeshes = new Map<string, THREE.Object3D>();
   private playerBuffs: ActiveBuff[] = [];
+  private dashState: DashState = createDashState();
   private pickupAnnouncement = '';
   private pickupAnnouncementTimer = 0;
 
@@ -540,8 +551,9 @@ export class FlightScene {
     this.purchasedUpgrades = [];
     this.shopOpen = false;
     this.shopOptions = [];
+    this.dashState = createDashState();
     this.shopWaveCleared = 0;
-
+    this.waveAnnouncement = `${this.currentWave > 0 ? `Wave ${this.currentWave}` : 'Wave 1'} incoming...`;
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
     this.spawnDronesForShip(this.player);
@@ -691,6 +703,13 @@ export class FlightScene {
       .add(right.multiplyScalar(strafeInput * effectiveThrust * 0.75));
     this.player.velocity.addScaledVector(acceleration, dt);
     this.player.velocity.multiplyScalar(0.985);
+
+    // Apply dash burst movement
+    if (isDashing(this.dashState)) {
+      this.player.velocity.x = this.dashState.dashDirX * this.player.stats.thrust * this.dashState.speedMultiplier / 50;
+      this.player.velocity.z = this.dashState.dashDirZ * this.player.stats.thrust * this.dashState.speedMultiplier / 50;
+    }
+
     this.player.position.addScaledVector(this.player.velocity, dt);
     this.clampToArena(this.player.position);
 
@@ -703,6 +722,17 @@ export class FlightScene {
     this.tryPlayerAbility('Digit2', 'afterburner');
     this.tryPlayerAbility('Digit3', 'overcharge');
     this.tryPlayerAbility('Digit4', 'emergency_repair');
+
+    // ── Dash (Space) ──
+    this.dashState = updateDash(this.dashState, dt);
+    if (this.keys.has('Space') && canDash(this.dashState)) {
+      const shipRot = this.player.group.rotation.y;
+      this.dashState = startDash(
+        this.dashState, forward.x, forward.z, right.x, right.z,
+        shipRot, this.upgradeStats.dashCooldownReduction,
+      );
+      this.particles.emit(ParticleSystem.dashBurst(this.player.position));
+    }
 
     this.syncShipTransform(this.player);
   }
@@ -1093,6 +1123,8 @@ export class FlightScene {
   }
 
   private applyDamage(ship: RuntimeShip, rawDamage: number, damageType: DamageType, armorPenetration: number, hitAngle: number): void {
+    // Player is invulnerable during dash
+    if (ship.team === 'player' && isInvulnerable(this.dashState)) return;
     const result: DamageResult = resolveDamage(
       rawDamage,
       damageType,
@@ -1873,6 +1905,7 @@ export class FlightScene {
         ${this.renderAbilitySlot(this.player.abilities[1], '2', '🔥')}
         ${this.renderAbilitySlot(this.player.abilities[2], '3', '⚡')}
         ${this.renderAbilitySlot(this.player.abilities[3], '4', '🔧')}
+        ${this.renderDashSlot()}
       </div>
       <p class="muted">Crew ${crewSummary}</p>
       ${this.player.maxShield > 0 ? `<div class="meter shield"><span style="width:${shieldRatio * 100}%"></span></div>` : ''}
@@ -2458,6 +2491,20 @@ export class FlightScene {
       <span class="ability-key">${key}</span>
       <span class="ability-icon">${icon}</span>
       ${cooldownPct}
+    </div>`;
+  }
+
+  private renderDashSlot(): string {
+    const progress = getDashProgress(this.dashState);
+    const isReady = progress >= 1;
+    const stateClass = isDashing(this.dashState) ? 'active' : isReady ? 'ready' : 'cooldown';
+    const fillHtml = !isReady
+      ? `<span class="ability-fill cooldown-fill" style="width:${progress * 100}%"></span>`
+      : '';
+    return `<div class="ability-slot ${stateClass}" title="Dash [Space]">
+      <span class="ability-key">⎵</span>
+      <span class="ability-icon">💨</span>
+      ${fillHtml}
     </div>`;
   }
 }

@@ -48,6 +48,7 @@ export interface LiveUpgradeStats {
   energyVulnerabilityReduction: number;
   pickupRangeBonus: number;
   buffDurationBonus: number;   // multiplicative
+  dashCooldownReduction: number; // additive (0 to <1)
   droneCapacityBonus: number;
   heatCapacityBonus: number;
 }
@@ -68,6 +69,7 @@ export function defaultLiveUpgradeStats(): LiveUpgradeStats {
     energyVulnerabilityReduction: 0,
     pickupRangeBonus: 0,
     buffDurationBonus: 1,
+    dashCooldownReduction: 0,
     droneCapacityBonus: 0,
     heatCapacityBonus: 0,
   };
