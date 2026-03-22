@@ -82,10 +82,26 @@ import {
   getCadenceMultiplier,
   getPickupColor,
   getPickupIcon,
+  getPickupLabel,
   type PickupState,
   type PickupKind,
   type ActiveBuff,
 } from '../game/pickups';
+import {
+  generateUpgradeOptions,
+  upgradeCost,
+  applyUpgrade,
+  applyAllUpgrades,
+  defaultLiveUpgradeStats,
+  getRarityColor,
+  getRarityLabel,
+  computeRestRepairAmount,
+  type UpgradeDef,
+  type PurchasedUpgrade,
+  type LiveUpgradeStats,
+} from '../game/upgrade-shop';
+
+const REPAIR_HP_FRACTION = 0.75;
 
 interface FlightSceneOptions {
   renderer: THREE.WebGLRenderer;
@@ -197,6 +213,14 @@ export class FlightScene {
   private endlessTotalKills = 0;
   private endlessScore = 0;
   private endlessBestWave = 0;
+  private endlessCredits = 0;
+
+  // Upgrade shop
+  private upgradeStats: LiveUpgradeStats = defaultLiveUpgradeStats();
+  private purchasedUpgrades: PurchasedUpgrade[] = [];
+  private shopOpen = false;
+  private shopOptions: UpgradeDef[] = [];
+  private shopWaveCleared = 0;
 
   // VFX
   private readonly particles = new ParticleSystem();
@@ -268,6 +292,14 @@ export class FlightScene {
 
   update(dt: number): void {
     this.elapsedEncounterSeconds += dt;
+
+    // If shop is open, only render — don't update game state
+    if (this.shopOpen) {
+      this.refreshHud();
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+
     this.updateCameraFollow(dt);
     this.updateWaveDelay(dt);
     this.updatePlayer(dt);
@@ -503,6 +535,12 @@ export class FlightScene {
     this.endlessTotalKills = 0;
     this.endlessScore = 0;
     this.endlessBestWave = 0;
+    this.endlessCredits = 0;
+    this.upgradeStats = defaultLiveUpgradeStats();
+    this.purchasedUpgrades = [];
+    this.shopOpen = false;
+    this.shopOptions = [];
+    this.shopWaveCleared = 0;
 
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
@@ -835,7 +873,7 @@ export class FlightScene {
     if (!weapon) return;
     ship.weaponIndex = (ship.weaponIndex + 1) % ship.weapons.length;
 
-    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) : 1;
+    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier : 1;
     const effectiveCadence = getEffectiveWeaponCadence(
       Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
       ship.powerFactor,
@@ -845,7 +883,7 @@ export class FlightScene {
     if (effectiveCadence <= 0.05) return;
 
     const normalizedDirection = direction.clone().normalize();
-    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) : 1;
+    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier : 1;
     const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier);
 
     if (weapon.archetype === 'beam') {
@@ -873,7 +911,7 @@ export class FlightScene {
     projectile.ttl = weapon.archetype === 'missile' ? 3.8 : 2.2;
     projectile.turnRate = weapon.archetype === 'missile' ? 2.8 : 0;
     projectile.target = weapon.archetype === 'missile' ? this.findNearestEnemy(ship) : null;
-    projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(weapon.projectileSpeed, 8)));
+    projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(weapon.projectileSpeed + (ship.team === 'player' ? this.upgradeStats.projectileSpeedBonus : 0), 8)));
     projectile.mesh.visible = true;
     projectile.mesh.position.copy(computeProjectileSpawnPosition(ship.position, spreadDirection, ship.radius));
     projectile.mesh.scale.setScalar(weapon.archetype === 'missile' ? 1.5 : weapon.archetype === 'laser' ? 0.9 : 1.1);
@@ -1360,7 +1398,10 @@ export class FlightScene {
         this.endlessScore += endlessWaveScore(this.currentWave - 1);
         // Grant credits for each wave cleared
         const waveCredits = endlessWaveCredits(this.currentWave - 1);
+        this.endlessCredits += waveCredits;
         this.onReward(this.encounterId, { credits: waveCredits, score: this.endlessScore, victory: true });
+        // Open upgrade shop instead of immediately spawning next wave
+        this.openUpgradeShop(this.currentWave);
       }
 
       this.waveAnnouncement = this.isEndlessMode
@@ -1646,6 +1687,28 @@ export class FlightScene {
       }
     }
 
+    // Pickups
+    for (const pickup of this.pickups) {
+      if (!pickup.active) continue;
+      const px = cx + pickup.x * scale;
+      const py = cy + pickup.z * scale;
+      const fadeAlpha = pickup.ttl < 3 ? pickup.ttl / 3 : 1;
+      // Parse hex color to rgba for canvas
+      const hex = getPickupColor(pickup.kind);
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      ctx.fillStyle = `rgba(${r},${g},${b},${0.6 * fadeAlpha})`;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(${r},${g},${b},${0.3 * fadeAlpha})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(px, py, 5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
     // Ships
     for (const ship of this.ships) {
       if (!ship.alive) continue;
@@ -1723,6 +1786,51 @@ export class FlightScene {
 
   private refreshHud(): void {
     const hud = this.uiRoot.querySelector('#flight-hud');
+
+    // When shop is open, replace HUD with upgrade selection UI
+    if (this.shopOpen && hud) {
+      const restRepair = this.shopWaveCleared > 0 && this.shopWaveCleared % 5 === 0;
+      const upgradeCards = this.shopOptions.map((u, i) => {
+        const cost = upgradeCost(u, this.shopWaveCleared);
+        const canAfford = this.endlessCredits >= cost;
+        const rarityColor = getRarityColor(u.rarity);
+        return `<div class="upgrade-card" style="border-color:${rarityColor};opacity:${canAfford ? 1 : 0.5}">
+          <div style="font-size:1.3em">${u.icon}</div>
+          <strong style="color:${rarityColor}">${u.displayName}</strong>
+          <small style="color:${rarityColor}">${getRarityLabel(u.rarity)}</small>
+          <p style="margin:4px 0">${u.description}</p>
+          <button class="primary" data-upgrade="${i}" ${canAfford ? '' : 'disabled'} style="font-size:0.85em">
+            ${cost} credits
+          </button>
+        </div>`;
+      }).join('');
+
+      hud.innerHTML = `
+        <div style="text-align:center;margin-bottom:8px">
+          <strong style="font-size:1.1em;color:#e2e8f0">⚡ Upgrade Shop — Wave ${this.shopWaveCleared} Cleared</strong>
+          ${restRepair ? '<p class="success">🔧 Rest stop: hull partially repaired!</p>' : ''}
+        </div>
+        <div class="upgrade-grid">${upgradeCards}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+          <span style="color:#fbbf24">💰 ${this.endlessCredits} credits</span>
+          <button data-action="skip-upgrade" style="font-size:0.85em">Skip →</button>
+        </div>
+        <p class="muted" style="margin-top:6px">Upgrades: ${this.purchasedUpgrades.length} purchased · Score: ${this.endlessScore.toLocaleString()}</p>
+      `;
+
+      // Bind upgrade card buttons
+      hud.querySelectorAll('[data-upgrade]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt((btn as HTMLElement).dataset.upgrade ?? '0', 10);
+          if (this.shopOptions[idx]) this.purchaseUpgrade(this.shopOptions[idx]);
+        });
+      });
+      hud.querySelector('[data-action="skip-upgrade"]')?.addEventListener('click', () => {
+        this.closeUpgradeShop();
+      });
+      return;
+    }
+
     const debrief = this.uiRoot.querySelector('#flight-debrief');
     if (!hud) return;
     const enemiesAlive = this.ships.filter((ship) => ship.team === 'enemy' && ship.alive).length;
@@ -1757,6 +1865,8 @@ export class FlightScene {
         ${this.encounterObjective.type === 'protect_ally' ? `<div><span>Convoy Progress</span><strong>${(convoyProgress * 100).toFixed(0)}%</strong></div>` : ''}
         ${this.isEndlessMode ? `<div><span>Kills</span><strong>${this.endlessTotalKills}</strong></div>` : ''}
         ${this.isEndlessMode ? `<div><span>Score</span><strong>${this.endlessScore.toLocaleString()}</strong></div>` : ''}
+        ${this.isEndlessMode ? `<div><span>Credits</span><strong style="color:#fbbf24">💰 ${this.endlessCredits}</strong></div>` : ''}
+        ${this.isEndlessMode && this.purchasedUpgrades.length > 0 ? `<div><span>Upgrades</span><strong>${this.purchasedUpgrades.length}</strong></div>` : ''}
       </div>
       <div class="ability-bar">
         ${this.renderAbilitySlot(this.player.abilities[0], '1', '🛡')}
@@ -1771,6 +1881,8 @@ export class FlightScene {
       ${this.encounterObjective.type === 'protect_ally' ? `<div class="meter"><span style="width:${Math.min(100, convoyProgress * 100)}%; background:linear-gradient(90deg,#67e8f9,#22d3ee)"></span></div>` : ''}
       <p class="muted">${this.encounterObjective.label}</p>
       <p class="muted">${this.waveAnnouncement}</p>
+      ${this.pickupAnnouncement ? `<p class="success" style="font-size:0.9em">${this.pickupAnnouncement}</p>` : ''}
+      ${this.playerBuffs.length > 0 ? `<div class="ability-bar">${this.playerBuffs.map((b) => `<div class="ability-slot active" title="${b.kind === 'power_surge' ? 'Power Surge' : 'Rapid Fire'} — ${b.remaining.toFixed(1)}s"><span class="ability-icon">${b.kind === 'power_surge' ? '⚡' : '🔥'}</span><span class="ability-fill active-fill" style="width:${(b.remaining / b.duration) * 100}%"></span></div>`).join('')}</div>` : ''}
       ${!this.player.alive
         ? this.isEndlessMode
           ? `<p class="warning">Ship disabled · Wave ${this.currentWave} · ${this.endlessTotalKills} kills · Score: ${this.endlessScore.toLocaleString()}</p>`
@@ -2080,6 +2192,247 @@ export class FlightScene {
         }
       }
     }
+  }
+
+  // ── Pickup System ──────────────────────────────────────────────
+
+  private spawnPickup(kind: PickupKind, x: number, z: number): void {
+    const state = createPickup(kind, x, z);
+    const mesh = this.buildPickupMesh(state);
+    this.pickupGroup.add(mesh);
+    this.pickupMeshes.set(state.id, mesh);
+    this.pickups.push(state);
+  }
+
+  private buildPickupMesh(state: PickupState): THREE.Object3D {
+    const group = new THREE.Group();
+    const color = getPickupColor(state.kind);
+
+    // Outer glow ring
+    const ringGeo = new THREE.RingGeometry(0.25, 0.45, 16);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.5,
+      side: THREE.DoubleSide,
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.15;
+    group.add(ring);
+
+    // Inner core
+    const coreGeo = new THREE.CircleGeometry(0.2, 12);
+    const coreMat = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.8,
+    });
+    const core = new THREE.Mesh(coreGeo, coreMat);
+    core.rotation.x = -Math.PI / 2;
+    core.position.y = 0.16;
+    group.add(core);
+
+    // Vertical beam
+    const beamGeo = new THREE.CylinderGeometry(0.03, 0.03, 1.2, 6);
+    const beamMat = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.3,
+    });
+    const beam = new THREE.Mesh(beamGeo, beamMat);
+    beam.position.y = 0.6;
+    group.add(beam);
+
+    return group;
+  }
+
+  private clearPickups(): void {
+    for (const mesh of Array.from(this.pickupMeshes.values())) {
+      this.pickupGroup.remove(mesh);
+      mesh.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose();
+          if (child.material instanceof THREE.Material) child.material.dispose();
+        }
+      });
+    }
+    this.pickupMeshes.clear();
+    this.pickups.length = 0;
+  }
+
+  private updatePickups(dt: number): void {
+    for (let i = this.pickups.length - 1; i >= 0; i--) {
+      const pickup = this.pickups[i];
+      const updated = updatePickup(pickup, dt);
+
+      // Magnetic attraction toward player
+      if (updated.active && this.player.alive) {
+        const attracted = applyPickupAttraction(
+          { ...updated, attractionRange: updated.attractionRange * (1 + this.upgradeStats.pickupRangeBonus) },
+          this.player.position.x, this.player.position.z, dt,
+        );
+        updated.x = attracted.newX;
+        updated.z = attracted.newZ;
+      }
+
+      this.pickups[i] = updated;
+
+      // Update mesh position and animation
+      const mesh = this.pickupMeshes.get(updated.id);
+      if (mesh) {
+        mesh.position.set(updated.x, 0, updated.z);
+        // Bob animation
+        mesh.position.y = Math.sin(updated.bobPhase) * 0.15 + 0.05;
+        // Fade when TTL is low
+        if (updated.ttl < 3) {
+          const fade = updated.ttl / 3;
+          mesh.traverse((child) => {
+            if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
+              child.material.opacity = fade * (child.material.userData?.baseOpacity ?? child.material.opacity);
+            }
+          });
+        }
+
+        // Remove expired
+        if (!updated.active) {
+          mesh.visible = false;
+          this.pickupGroup.remove(mesh);
+          mesh.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+              child.geometry.dispose();
+              if (child.material instanceof THREE.Material) child.material.dispose();
+            }
+          });
+          this.pickupMeshes.delete(updated.id);
+          this.pickups.splice(i, 1);
+          continue;
+        }
+
+        // Try collection
+        if (this.player.alive) {
+          const result = tryCollectPickup(updated, this.player.position.x, this.player.position.z, this.player.maxShield, this.player.moduleStates);
+          if (result.collected) {
+            // Apply effects
+            if (result.shieldRestore > 0) {
+              this.player.shield = Math.min(this.player.maxShield, this.player.shield + result.shieldRestore);
+              this.particles.emit(ParticleSystem.shieldAbsorb(this.player.position, '#38bdf8'));
+            }
+            if (result.repairTarget) {
+              const repaired = applyRepair(result.repairTarget, result.kind === 'salvage' ? 1.0 : REPAIR_HP_FRACTION);
+              const idx = this.player.moduleStates.findIndex((m) => m.instanceId === result.repairTarget!.instanceId);
+              if (idx >= 0) this.player.moduleStates[idx] = repaired;
+              this.player.hp = this.player.moduleStates.filter((m) => !m.destroyed).reduce((sum, m) => sum + m.currentHp, 0);
+              this.restoreModuleMesh(this.player, result.repairTarget.instanceId);
+              this.particles.emit(ParticleSystem.shieldAbsorb(this.player.position, '#4ade80'));
+            }
+            if (result.buffGained) {
+              // Apply buff duration bonus from upgrades
+              const buff = result.buffGained;
+              buff.remaining *= this.upgradeStats.buffDurationBonus;
+              buff.duration *= this.upgradeStats.buffDurationBonus;
+              this.playerBuffs.push(buff);
+            }
+
+            this.pickupAnnouncement = `${getPickupIcon(result.kind ?? 'shield_cell')} ${getPickupLabel(result.kind ?? 'shield_cell')} collected!`;
+            this.pickupAnnouncementTimer = 2.0;
+
+            // Remove pickup
+            this.pickupGroup.remove(mesh);
+            mesh.traverse((child) => {
+              if (child instanceof THREE.Mesh) {
+                child.geometry.dispose();
+                if (child.material instanceof THREE.Material) child.material.dispose();
+              }
+            });
+            this.pickupMeshes.delete(updated.id);
+            this.pickups.splice(i, 1);
+          }
+        }
+      }
+    }
+
+    // Decay pickup announcement
+    if (this.pickupAnnouncementTimer > 0) {
+      this.pickupAnnouncementTimer -= dt;
+      if (this.pickupAnnouncementTimer <= 0) {
+        this.pickupAnnouncement = '';
+      }
+    }
+  }
+
+  private updatePlayerBuffs(dt: number): void {
+    this.playerBuffs = updateBuffs(this.playerBuffs, dt);
+  }
+
+  // ── Upgrade Shop ──────────────────────────────────────────────
+
+  private openUpgradeShop(waveCleared: number): void {
+    this.shopWaveCleared = waveCleared;
+    this.shopOptions = generateUpgradeOptions(waveCleared, this.purchasedUpgrades);
+
+    // Free hull repair every 5 waves
+    if (waveCleared > 0 && waveCleared % 5 === 0) {
+      const repairAmount = computeRestRepairAmount(this.player.stats.maxHp, waveCleared);
+      this.player.hp = Math.min(this.player.stats.maxHp, this.player.hp + repairAmount);
+    }
+
+    this.shopOpen = true;
+    this.waveAnnouncement = `Wave ${waveCleared} cleared! Choose an upgrade or skip.`;
+  }
+
+  private purchaseUpgrade(upgrade: UpgradeDef): void {
+    const cost = upgradeCost(upgrade, this.shopWaveCleared);
+    if (this.endlessCredits < cost) return;
+
+    this.endlessCredits -= cost;
+    this.upgradeStats = applyUpgrade(this.upgradeStats, upgrade);
+    this.purchasedUpgrades.push({ def: upgrade, wavePurchased: this.shopWaveCleared });
+
+    // Rebuild player stats from base + all upgrade bonuses
+    this.rebuildPlayerWithUpgrades();
+    this.closeUpgradeShop();
+  }
+
+  private closeUpgradeShop(): void {
+    this.shopOpen = false;
+    this.shopOptions = [];
+    // Resume wave spawn — the wave delay handles the timing
+    this.waveDelay = 0.5; // Brief delay before next wave spawns
+    this.waveAnnouncement = `Wave ${this.currentWave} incoming...`;
+  }
+
+  /**
+   * Rebuild player stats by recomputing base stats from blueprint
+   * and applying all accumulated upgrade bonuses on top.
+   */
+  private rebuildPlayerWithUpgrades(): void {
+    const s = this.upgradeStats;
+    const baseStats = applyCrewModifiers(computeShipStats(this.player.blueprint), this.player.blueprint.crew);
+
+    // Start from base stats
+    this.player.stats = { ...baseStats };
+
+    // Apply additive bonuses
+    this.player.stats.maxHp += s.maxHpBonus;
+    this.player.stats.shieldStrength += s.shieldBonus;
+    this.player.stats.shieldRecharge *= (1 + s.shieldRechargeBonus);
+    this.player.stats.armorRating += s.armorRatingBonus;
+    this.player.stats.kineticBypass += s.kineticBypassBonus;
+    this.player.stats.energyVulnerability = Math.max(0, this.player.stats.energyVulnerability - s.energyVulnerabilityReduction);
+    this.player.stats.powerOutput *= (1 + s.powerOutputBonus);
+    this.player.stats.heatCapacity += s.heatCapacityBonus;
+    this.player.stats.cooling *= (1 + s.coolingBonus);
+    this.player.stats.thrust *= (1 + s.thrustBonus);
+    this.player.stats.droneCapacity += s.droneCapacityBonus;
+
+    // Recalculate power factor
+    this.player.powerFactor = computePowerFactor(this.player.stats.powerOutput, this.player.stats.powerDemand);
+
+    // Update runtime values
+    this.player.maxShield += s.shieldBonus;
+    this.player.shield = Math.min(this.player.shield + s.shieldBonus, this.player.maxShield);
+    this.player.hp = Math.min(this.player.hp + s.maxHpBonus, this.player.stats.maxHp);
   }
 
   private renderAbilitySlot(ability: AbilityRuntime, key: string, icon: string): string {
