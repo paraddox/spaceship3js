@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { ShipBlueprint } from '../core/types';
 import type { EncounterObjective } from './objectives';
+import type { HazardSpawn } from './hazards';
 import { DEFAULT_CREW_ALLOCATION } from './crew';
 import { createExampleBlueprint } from '../state/shipBlueprint';
 
@@ -16,6 +17,7 @@ export interface EncounterEnemy {
 export interface EncounterWave {
   name: string;
   enemies: EncounterEnemy[];
+  hazards?: HazardSpawn[];
 }
 
 export interface EncounterPreset {
@@ -87,6 +89,11 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
           { id: 'enemy-1', blueprint: waveOneEnemy, position: new THREE.Vector3(-8, 0, -8), rotation: 0.3, preferredRange: 9, fireJitter: 0.35 },
           { id: 'enemy-2', blueprint: missileEnemy, position: new THREE.Vector3(8, 0, -10), rotation: -0.2, preferredRange: 11, fireJitter: 0.55 },
         ],
+        hazards: [
+          { kind: 'asteroid', x: -3, z: -4, radius: 1.2 },
+          { kind: 'asteroid', x: 5, z: -2, radius: 0.9 },
+          { kind: 'shield_conduit', x: 0, z: 5, radius: 1.5 },
+        ],
       },
       {
         name: 'Wave 2',
@@ -95,12 +102,26 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
           { id: 'enemy-4', blueprint: beamEnemy, position: new THREE.Vector3(0, 0, -12), rotation: 0.0, preferredRange: 8.5, fireJitter: 0.2 },
           { id: 'enemy-5', blueprint: missileEnemy, position: new THREE.Vector3(11, 0, -6), rotation: -0.1, preferredRange: 12, fireJitter: 0.5 },
         ],
+        hazards: [
+          { kind: 'asteroid', x: -6, z: -7, radius: 1.0 },
+          { kind: 'asteroid', x: 7, z: -5, radius: 1.3 },
+          { kind: 'damage_nebula', x: 0, z: -8, radius: 2.5, damagePerSecond: 10 },
+          { kind: 'shield_conduit', x: -8, z: 3, radius: 1.4 },
+        ],
       },
       {
         name: 'Wave 3',
         enemies: [
           { id: 'enemy-6', blueprint: frigateEnemy, position: new THREE.Vector3(0, 0, -12), rotation: 0.0, preferredRange: 10, fireJitter: 0.3 },
           { id: 'enemy-7', blueprint: beamEnemy, position: new THREE.Vector3(-10, 0, -11), rotation: 0.2, preferredRange: 9.5, fireJitter: 0.25 },
+        ],
+        hazards: [
+          { kind: 'asteroid', x: -4, z: -3, radius: 1.4 },
+          { kind: 'asteroid', x: 6, z: -8, radius: 1.1 },
+          { kind: 'asteroid', x: 2, z: -6, radius: 0.8 },
+          { kind: 'damage_nebula', x: -8, z: -5, radius: 2.8, damagePerSecond: 14 },
+          { kind: 'shield_conduit', x: 8, z: 2, radius: 1.6 },
+          { kind: 'shield_conduit', x: -3, z: 7, radius: 1.3 },
         ],
       },
     ],
@@ -132,6 +153,11 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
           { id: 'survival-2', blueprint: beamEnemy, position: new THREE.Vector3(0, 0, -12), rotation: 0, preferredRange: 7.5, fireJitter: 0.1 },
           { id: 'survival-3', blueprint: missileEnemy, position: new THREE.Vector3(12, 0, -8), rotation: -0.15, preferredRange: 11.5, fireJitter: 0.45 },
         ],
+        hazards: [
+          { kind: 'asteroid', x: -5, z: -3, radius: 1.0 },
+          { kind: 'asteroid', x: 6, z: -6, radius: 1.2 },
+          { kind: 'shield_conduit', x: 0, z: 6, radius: 1.5 },
+        ],
       },
     ],
   },
@@ -148,6 +174,11 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
           { id: 'escort-1', blueprint: waveOneEnemy, position: new THREE.Vector3(-10, 0, -7), rotation: 0.15, preferredRange: 7.5, fireJitter: 0.3 },
           { id: 'escort-2', blueprint: beamEnemy, position: new THREE.Vector3(10, 0, -7), rotation: -0.15, preferredRange: 8.5, fireJitter: 0.2 },
         ],
+        hazards: [
+          { kind: 'asteroid', x: -4, z: -5, radius: 1.1 },
+          { kind: 'asteroid', x: 5, z: -3, radius: 0.9 },
+          { kind: 'shield_conduit', x: 3, z: 4, radius: 1.5 },
+        ],
       },
       {
         name: 'Reinforcements',
@@ -155,6 +186,13 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
           { id: 'escort-3', blueprint: missileEnemy, position: new THREE.Vector3(-6, 0, -12), rotation: 0.1, preferredRange: 10, fireJitter: 0.4 },
           { id: 'escort-4', blueprint: waveOneEnemy, position: new THREE.Vector3(8, 0, -11), rotation: -0.1, preferredRange: 8, fireJitter: 0.3 },
           { id: 'escort-5', blueprint: beamEnemy, position: new THREE.Vector3(0, 0, -13), rotation: 0.0, preferredRange: 7.5, fireJitter: 0.15 },
+        ],
+        hazards: [
+          { kind: 'asteroid', x: -7, z: -2, radius: 1.0 },
+          { kind: 'asteroid', x: 6, z: -7, radius: 1.3 },
+          { kind: 'damage_nebula', x: -3, z: -10, radius: 2.5, damagePerSecond: 12 },
+          { kind: 'shield_conduit', x: -6, z: 3, radius: 1.4 },
+          { kind: 'shield_conduit', x: 1, z: 6, radius: 1.5 },
         ],
       },
     ],

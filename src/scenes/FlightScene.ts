@@ -59,6 +59,17 @@ import {
   type AbilityRuntime,
 } from '../game/simulation';
 import { ParticleSystem, createScreenShake, updateScreenShake, type ScreenShakeState } from '../game/particles';
+import {
+  createHazardStates,
+  updateHazard,
+  applyShipHazardCollision,
+  damageAsteroid,
+  checkProjectileAsteroidCollision,
+  checkProjectileNebulaBoost,
+  computeHazardSteering,
+  type HazardState,
+  type HazardSpawn,
+} from '../game/hazards';
 
 interface FlightSceneOptions {
   renderer: THREE.WebGLRenderer;
@@ -176,6 +187,11 @@ export class FlightScene {
   private screenShake: ScreenShakeState | null = null;
   private thrustTimer = 0;
 
+  // Hazards
+  private readonly hazardGroup = new THREE.Group();
+  private readonly hazards: HazardState[] = [];
+  private readonly hazardMeshes = new Map<string, THREE.Object3D>();
+
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
     this.keys.add(event.code);
@@ -217,7 +233,7 @@ export class FlightScene {
     const ambient = new THREE.AmbientLight(0xffffff, 1.2);
     const rim = new THREE.DirectionalLight(0xbfe1ff, 1.1);
     rim.position.set(8, 10, 6);
-    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup, this.healthBarGroup, this.particles.group);
+    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup, this.healthBarGroup, this.particles.group, this.hazardGroup);
 
     this.buildArena();
     this.buildProjectiles();
@@ -240,6 +256,8 @@ export class FlightScene {
     this.updateThrustTrails(dt);
     this.updateScreenShake(dt);
     this.coolShips(dt);
+    this.updateHazards(dt);
+    this.updateShipHazards(dt);
     this.updateAbilities(dt);
     this.updateHealthBars();
     this.updateEncounterState();
@@ -441,6 +459,7 @@ export class FlightScene {
     this.drones.length = 0;
     this.effects.length = 0;
     this.clearHealthBars();
+    this.clearHazards();
     for (const projectile of this.projectiles) {
       this.deactivateProjectile(projectile);
     }
@@ -480,6 +499,13 @@ export class FlightScene {
     }
 
     this.waveAnnouncement = `${wave.name} deployed`;
+
+    // Spawn hazards for this wave (replacing previous wave's hazards)
+    this.clearHazards();
+    if (wave.hazards && wave.hazards.length > 0) {
+      this.spawnHazards(wave.hazards);
+    }
+
     for (const enemy of wave.enemies) {
       const runtimeShip = this.createShip(
         enemy.id,
@@ -738,11 +764,17 @@ export class FlightScene {
         enemy.stats.heatCapacity,
       ) * (isAfterburning(enemy.abilities) ? 1.8 : 1);
 
+      // Hazard avoidance steering
+      const seekConduit = ctx.ownHpRatio < 0.5 && ctx.ownShieldRatio < 0.3;
+      const hazardSteer = computeHazardSteering(enemy.position.x, enemy.position.z, this.hazards, seekConduit, true);
+
       // Aggressive enemies commit harder to forward movement
       const forwardCommit = stance === 'aggressive' ? 0.45 : stance === 'retreating' ? 0.25 : 0.35;
 
       enemy.velocity.addScaledVector(direction, advance * effectiveThrust * dt * forwardCommit);
       enemy.velocity.addScaledVector(side, lateralThrust * dt * 0.7);
+      enemy.velocity.x += hazardSteer.x * dt;
+      enemy.velocity.z += hazardSteer.z * dt;
       enemy.velocity.multiplyScalar(stance === 'retreating' ? 0.988 : 0.982);
       enemy.position.addScaledVector(enemy.velocity, dt);
       this.clampToArena(enemy.position);
@@ -845,6 +877,26 @@ export class FlightScene {
       if (projectile.mesh.position.length() > MAX_WORLD_RADIUS) {
         this.deactivateProjectile(projectile);
         continue;
+      }
+
+      // Hazard collision: asteroids absorb projectiles
+      let hitAsteroid = false;
+      for (let hi = 0; hi < this.hazards.length; hi++) {
+        if (checkProjectileAsteroidCollision(projectile.mesh.position.x, projectile.mesh.position.z, this.hazards[hi])) {
+          this.hazards[hi] = damageAsteroid(this.hazards[hi], projectile.damage);
+          this.deactivateProjectile(projectile);
+          hitAsteroid = true;
+          break;
+        }
+      }
+      if (hitAsteroid) continue;
+
+      // Hazard boost: projectiles passing through nebulas get 15% damage boost
+      for (const hazard of this.hazards) {
+        if (checkProjectileNebulaBoost(projectile.mesh.position.x, projectile.mesh.position.z, hazard)) {
+          projectile.damage *= 1.15;
+          break; // only apply once
+        }
       }
 
       let hit = false;
@@ -1507,6 +1559,55 @@ export class FlightScene {
       ctx.fill();
     }
 
+    // Hazards
+    for (const hazard of this.hazards) {
+      if (!hazard.active) continue;
+      const hx = cx + hazard.x * scale;
+      const hy = cy + hazard.z * scale;
+      const hr = hazard.radius * scale;
+
+      if (hazard.kind === 'asteroid') {
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.6)';
+        ctx.beginPath();
+        ctx.arc(hx, hy, Math.max(2, hr), 0, Math.PI * 2);
+        ctx.fill();
+        // HP indicator
+        const hpRatio = hazard.hp / hazard.maxHp;
+        if (hpRatio < 1) {
+          ctx.strokeStyle = 'rgba(148, 163, 184, 0.4)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(hx, hy, hr + 2, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * hpRatio);
+          ctx.stroke();
+        }
+      } else if (hazard.kind === 'shield_conduit') {
+        ctx.strokeStyle = `rgba(56, 189, 248, ${0.2 + hazard.charge * 0.35})`;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(hx, hy, Math.max(3, hr), 0, Math.PI * 2);
+        ctx.stroke();
+        // Cross marker
+        ctx.strokeStyle = `rgba(56, 189, 248, ${0.3 + hazard.charge * 0.3})`;
+        ctx.lineWidth = 1;
+        const cr = Math.max(2, hr * 0.4);
+        ctx.beginPath();
+        ctx.moveTo(hx - cr, hy); ctx.lineTo(hx + cr, hy);
+        ctx.moveTo(hx, hy - cr); ctx.lineTo(hx, hy + cr);
+        ctx.stroke();
+      } else if (hazard.kind === 'damage_nebula') {
+        const pulse = 0.7 + 0.3 * Math.sin(hazard.pulsePhase);
+        ctx.fillStyle = `rgba(168, 85, 247, ${0.08 * pulse})`;
+        ctx.beginPath();
+        ctx.arc(hx, hy, Math.max(3, hr), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = `rgba(168, 85, 247, ${0.2 * pulse})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(hx, hy, Math.max(3, hr), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
     // Ships
     for (const ship of this.ships) {
       if (!ship.alive) continue;
@@ -1709,6 +1810,238 @@ export class FlightScene {
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
     this.raycaster.ray.intersectPlane(this.groundPlane, this.mouseWorld);
+  }
+
+  // ── Hazard System ──────────────────────────────────────────────
+
+  private spawnHazards(spawns: HazardSpawn[]): void {
+    const states = createHazardStates(spawns);
+    for (const state of states) {
+      const mesh = this.buildHazardMesh(state);
+      this.hazardGroup.add(mesh);
+      this.hazardMeshes.set(state.id, mesh);
+      this.hazards.push(state);
+    }
+  }
+
+  private buildHazardMesh(state: HazardState): THREE.Object3D {
+    const group = new THREE.Group();
+    group.position.set(state.x, 0, state.z);
+
+    if (state.kind === 'asteroid') {
+      // Irregular rocky shape using icosahedron with vertex jitter
+      const geo = new THREE.IcosahedronGeometry(state.radius, 1);
+      const positions = geo.attributes.position;
+      for (let i = 0; i < positions.count; i++) {
+        const x = positions.getX(i);
+        const y = positions.getY(i);
+        const z = positions.getZ(i);
+        const jitter = 0.75 + Math.random() * 0.5;
+        positions.setXYZ(i, x * jitter, y * jitter * 0.4, z * jitter);
+      }
+      geo.computeVertexNormals();
+      const mat = new THREE.MeshStandardMaterial({
+        color: '#4a5568',
+        roughness: 0.95,
+        metalness: 0.05,
+        flatShading: true,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.y = Math.random() * Math.PI * 2;
+      group.add(mesh);
+    } else if (state.kind === 'shield_conduit') {
+      // Glowing ring on ground plane
+      const ringGeo = new THREE.RingGeometry(state.radius * 0.3, state.radius, 32);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: '#38bdf8',
+        transparent: true,
+        opacity: 0.35,
+        side: THREE.DoubleSide,
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.05;
+      group.add(ring);
+
+      // Inner glow
+      const glowGeo = new THREE.CircleGeometry(state.radius * 0.5, 24);
+      const glowMat = new THREE.MeshBasicMaterial({
+        color: '#0ea5e9',
+        transparent: true,
+        opacity: 0.12,
+      });
+      const glow = new THREE.Mesh(glowGeo, glowMat);
+      glow.rotation.x = -Math.PI / 2;
+      glow.position.y = 0.04;
+      group.add(glow);
+    } else if (state.kind === 'damage_nebula') {
+      // Semi-transparent cloud disc
+      const nebulaGeo = new THREE.CircleGeometry(state.radius, 32);
+      const nebulaMat = new THREE.MeshBasicMaterial({
+        color: '#a855f7',
+        transparent: true,
+        opacity: 0.15,
+        depthWrite: false,
+      });
+      const nebula = new THREE.Mesh(nebulaGeo, nebulaMat);
+      nebula.rotation.x = -Math.PI / 2;
+      nebula.position.y = 0.08;
+      group.add(nebula);
+
+      // Outer ring
+      const ringGeo = new THREE.RingGeometry(state.radius * 0.85, state.radius, 32);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: '#7c3aed',
+        transparent: true,
+        opacity: 0.25,
+        side: THREE.DoubleSide,
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.06;
+      group.add(ring);
+    }
+
+    return group;
+  }
+
+  private clearHazards(): void {
+    for (const mesh of Array.from(this.hazardMeshes.values())) {
+      this.hazardGroup.remove(mesh);
+      mesh.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose();
+          if (child.material instanceof THREE.Material) child.material.dispose();
+        }
+      });
+    }
+    this.hazardMeshes.clear();
+    this.hazards.length = 0;
+  }
+
+  private updateHazards(dt: number): void {
+    const now = performance.now() / 1000;
+
+    for (let i = 0; i < this.hazards.length; i++) {
+      const hazard = this.hazards[i];
+      const updated = updateHazard(hazard, dt);
+      this.hazards[i] = updated;
+
+      // Update mesh visuals
+      const mesh = this.hazardMeshes.get(updated.id);
+      if (!mesh) continue;
+
+      if (updated.kind === 'asteroid') {
+        // Fade destroyed asteroids
+        if (!updated.active) {
+          mesh.traverse((child) => {
+            if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
+              child.material.opacity = Math.max(0, (child.material.opacity ?? 1) - dt * 2);
+              child.material.transparent = true;
+            }
+          });
+          if (!mesh.visible) continue;
+          const firstChild = mesh.children[0] as THREE.Mesh | undefined;
+          if (firstChild?.material instanceof THREE.MeshStandardMaterial && firstChild.material.opacity <= 0) {
+            mesh.visible = false;
+            this.particles.emit(ParticleSystem.explosionBurst(
+              new THREE.Vector3(updated.x, 0.3, updated.z), '#94a3b8', 12,
+            ));
+          }
+        }
+      } else if (updated.kind === 'shield_conduit') {
+        // Pulse opacity based on charge level
+        const charge = updated.charge;
+        const ring = mesh.children[0] as THREE.Mesh | undefined;
+        const glow = mesh.children[1] as THREE.Mesh | undefined;
+        if (ring?.material instanceof THREE.MeshBasicMaterial) {
+          ring.material.opacity = 0.15 + charge * 0.25;
+          ring.material.color.set(charge > 0.3 ? '#38bdf8' : '#334155');
+        }
+        if (glow?.material instanceof THREE.MeshBasicMaterial) {
+          glow.material.opacity = 0.05 + charge * 0.1;
+        }
+      } else if (updated.kind === 'damage_nebula') {
+        // Pulse size and opacity
+        const pulse = 0.85 + 0.15 * Math.sin(updated.pulsePhase);
+        const nebula = mesh.children[0] as THREE.Mesh | undefined;
+        const ring = mesh.children[1] as THREE.Mesh | undefined;
+        if (nebula?.material instanceof THREE.MeshBasicMaterial) {
+          nebula.material.opacity = 0.1 + pulse * 0.08;
+        }
+        if (ring?.material instanceof THREE.MeshBasicMaterial) {
+          ring.material.opacity = 0.2 + pulse * 0.1;
+        }
+        // Rotate ring slowly
+        if (ring) ring.rotation.z += dt * 0.3;
+      }
+    }
+  }
+
+  private updateShipHazards(dt: number): void {
+    const now = performance.now() / 1000;
+
+    for (const ship of this.ships) {
+      if (!ship.alive) continue;
+
+      for (const hazard of this.hazards) {
+        const result = applyShipHazardCollision(
+          hazard, ship.id, ship.position.x, ship.position.z, ship.radius * 0.4, dt, now,
+        );
+
+        // Asteroid push
+        if (result.pushX !== 0 || result.pushZ !== 0) {
+          ship.position.x += result.pushX;
+          ship.position.z += result.pushZ;
+          // Kill velocity component into the asteroid
+          const pushAngle = Math.atan2(result.pushX, result.pushZ);
+          const velAngle = Math.atan2(ship.velocity.x, ship.velocity.z);
+          const angleDiff = Math.abs(Math.atan2(Math.sin(velAngle - pushAngle), Math.cos(velAngle - pushAngle)));
+          if (angleDiff < Math.PI / 2) {
+            ship.velocity.multiplyScalar(0.6);
+          }
+        }
+
+        // Shield conduit restore
+        if (result.shieldRestored > 0 && ship.maxShield > 0) {
+          ship.shield = Math.min(ship.maxShield, ship.shield + result.shieldRestored);
+          if (ship.team === 'player') {
+            this.particles.emit(ParticleSystem.shieldAbsorb(ship.position, '#38bdf8'));
+          }
+        }
+
+        // Damage nebula
+        if (result.damageTaken > 0) {
+          // Nebula does raw energy damage — bypass shields but respects armor
+          const resolved = resolveDamage(
+            result.damageTaken, 'energy', 0.5,
+            ship.shield, ship.stats.armorRating,
+            ship.stats.kineticBypass, ship.stats.energyVulnerability,
+          );
+          ship.shield -= resolved.shieldAbsorbed;
+          ship.shield = Math.max(0, ship.shield);
+          if (resolved.hullDamage > 0) {
+            const destroyed = damageModules(ship.moduleStates, resolved.hullDamage, Math.random() * Math.PI * 2, 0.6);
+            if (destroyed.length > 0) {
+              for (const id of destroyed) {
+                this.darkenModuleMeshes(ship, id);
+              }
+              ship.hp = ship.moduleStates.filter((m) => !m.destroyed).reduce((sum, m) => sum + m.currentHp, 0);
+            }
+          }
+          if (ship.hp <= 0) {
+            ship.alive = false;
+            ship.group.visible = false;
+            playExplosion();
+            this.spawnExplosionVisual(ship.position, ship.team === 'player' ? '#fca5a5' : '#fb7185');
+            for (const config of ParticleSystem.deathExplosion(ship.position)) {
+              this.particles.emit(config);
+            }
+          }
+          // Shield drain multiplier handled via reduced recharge in coolShips
+        }
+      }
+    }
   }
 
   private renderAbilitySlot(ability: AbilityRuntime, key: string, icon: string): string {

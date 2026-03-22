@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { ShipBlueprint } from '../core/types';
 import type { EncounterEnemy, EncounterWave } from './encounters';
+import { generateRandomHazards } from './hazards';
 import { DEFAULT_CREW_ALLOCATION } from './crew';
 
 // ── Procedural Wave Generator ─────────────────────────────────
@@ -298,7 +299,7 @@ export function generateEndlessWave(waveNumber: number): EncounterWave {
     waveName = `${tier.tierLabel} ${waveNumber}`;
   }
 
-  return { name: waveName, enemies };
+  return { name: waveName, enemies, hazards: generateRandomHazards(waveNumber, 16) };
 }
 
 /**
