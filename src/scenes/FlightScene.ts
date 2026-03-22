@@ -31,6 +31,11 @@ import {
   type TacticalDecision,
 } from '../game/tactical-ai';
 import {
+  generateEndlessWave,
+  endlessWaveCredits,
+  endlessWaveScore,
+} from '../game/endless-generator';
+import {
   advanceEncounterState,
   computeCoolingPerSecond,
   computePowerFactor,
@@ -53,6 +58,7 @@ import {
   type AbilityId,
   type AbilityRuntime,
 } from '../game/simulation';
+import { ParticleSystem, createScreenShake, updateScreenShake, type ScreenShakeState } from '../game/particles';
 
 interface FlightSceneOptions {
   renderer: THREE.WebGLRenderer;
@@ -143,7 +149,7 @@ export class FlightScene {
   private readonly projectiles: Projectile[] = [];
   private readonly effects: RuntimeEffect[] = [];
   private readonly keys = new Set<string>();
-  private readonly waves: EncounterWave[];
+  private waves: EncounterWave[];
 
   private player!: RuntimeShip;
   private fireHeld = false;
@@ -158,6 +164,17 @@ export class FlightScene {
   private elapsedEncounterSeconds = 0;
   private minimapCanvas: HTMLCanvasElement | null = null;
   private minimapCtx: CanvasRenderingContext2D | null = null;
+
+  // Endless mode tracking
+  private isEndlessMode = false;
+  private endlessTotalKills = 0;
+  private endlessScore = 0;
+  private endlessBestWave = 0;
+
+  // VFX
+  private readonly particles = new ParticleSystem();
+  private screenShake: ScreenShakeState | null = null;
+  private thrustTimer = 0;
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
@@ -180,9 +197,17 @@ export class FlightScene {
     this.onReward = onReward;
     this.onBack = onBack;
     this.encounterId = encounterId;
-    const preset = getEncounterPreset(encounterId) ?? ENCOUNTER_PRESETS[0];
-    this.waves = preset?.waves ?? [];
-    this.encounterObjective = preset?.objective ?? { type: 'eliminate_all', label: 'Destroy all hostile ships' };
+    this.isEndlessMode = encounterId === 'endless';
+
+    if (this.isEndlessMode) {
+      // Endless mode: waves are generated procedurally
+      this.waves = [];
+      this.encounterObjective = { type: 'eliminate_all', label: 'Endless Gauntlet — survive as long as you can' };
+    } else {
+      const preset = getEncounterPreset(encounterId) ?? ENCOUNTER_PRESETS[0];
+      this.waves = preset?.waves ?? [];
+      this.encounterObjective = preset?.objective ?? { type: 'eliminate_all', label: 'Destroy all hostile ships' };
+    }
 
     this.camera.position.set(0, 20, 0.001);
     this.camera.up.set(0, 0, -1);
@@ -192,7 +217,7 @@ export class FlightScene {
     const ambient = new THREE.AmbientLight(0xffffff, 1.2);
     const rim = new THREE.DirectionalLight(0xbfe1ff, 1.1);
     rim.position.set(8, 10, 6);
-    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup, this.healthBarGroup);
+    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup, this.healthBarGroup, this.particles.group);
 
     this.buildArena();
     this.buildProjectiles();
@@ -211,6 +236,9 @@ export class FlightScene {
     this.updateDrones(dt);
     this.updateProjectiles(dt);
     this.updateEffects(dt);
+    this.particles.update(dt);
+    this.updateThrustTrails(dt);
+    this.updateScreenShake(dt);
     this.coolShips(dt);
     this.updateAbilities(dt);
     this.updateHealthBars();
@@ -422,7 +450,12 @@ export class FlightScene {
     this.waveDelay = 0;
     this.waveAnnouncement = 'Wave 1 engaged';
     this.hasGrantedReward = false;
+    this.screenShake = null;
+    this.particles.clear();
     this.elapsedEncounterSeconds = 0;
+    this.endlessTotalKills = 0;
+    this.endlessScore = 0;
+    this.endlessBestWave = 0;
 
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
@@ -438,8 +471,14 @@ export class FlightScene {
   }
 
   private spawnWave(waveNumber: number): void {
-    const wave = this.waves[waveNumber - 1];
-    if (!wave) return;
+    let wave = this.waves[waveNumber - 1];
+
+    // Endless mode: generate wave procedurally
+    if (!wave) {
+      wave = generateEndlessWave(waveNumber);
+      this.waves.push(wave);
+    }
+
     this.waveAnnouncement = `${wave.name} deployed`;
     for (const enemy of wave.enemies) {
       const runtimeShip = this.createShip(
@@ -950,12 +989,22 @@ export class FlightScene {
 
     if (result.shieldAbsorbed > 0) {
       this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#38bdf8' : '#f9a8d4');
+      this.particles.emit(ParticleSystem.shieldAbsorb(ship.position, ship.team === 'player' ? '#38bdf8' : '#f9a8d4'));
     }
 
     // Route hull damage through module system
     if (result.hullDamage > 0) {
       if (result.shieldAbsorbed <= 0) {
         this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185');
+        this.particles.emit(ParticleSystem.hitSpark(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185'));
+      }
+
+      // Screen shake when player takes hull damage
+      if (ship.team === 'player' && !this.screenShake) {
+        const shakeIntensity = Math.min(0.6, result.hullDamage / ship.stats.maxHp * 3);
+        if (shakeIntensity > 0.05) {
+          this.screenShake = createScreenShake(shakeIntensity, 0.25);
+        }
       }
 
       const destroyed = damageModules(ship.moduleStates, result.hullDamage, hitAngle, 0.6);
@@ -983,6 +1032,7 @@ export class FlightScene {
         if (mod) {
           const def = getModuleDefinition(mod.definitionId);
           this.waveAnnouncement = `${def.displayName} destroyed!`;
+          this.particles.emit(ParticleSystem.explosionBurst(ship.position, '#ef4444', 10));
         }
       }
 
@@ -995,6 +1045,19 @@ export class FlightScene {
       ship.group.visible = false;
       playExplosion();
       this.spawnExplosionVisual(ship.position, ship.team === 'player' ? '#fca5a5' : '#fb7185');
+      // Particle death explosion
+      for (const config of ParticleSystem.deathExplosion(ship.position)) {
+        this.particles.emit(config);
+      }
+      // Bigger screen shake for player death
+      if (ship.team === 'player') {
+        this.screenShake = createScreenShake(0.8, 0.5);
+      }
+
+      // Track kills in endless mode
+      if (this.isEndlessMode && ship.team === 'enemy') {
+        this.endlessTotalKills += 1;
+      }
     }
   }
 
@@ -1190,7 +1253,7 @@ export class FlightScene {
 
     const state: EncounterState = {
       currentWave: this.currentWave,
-      totalWaves: this.waves.length,
+      totalWaves: this.isEndlessMode ? this.currentWave + 1 : this.waves.length,
       remainingEnemies,
       playerAlive: this.player.alive,
     };
@@ -1200,7 +1263,26 @@ export class FlightScene {
     if (progress.shouldSpawnWave && this.waveDelay <= 0) {
       this.currentWave = progress.nextWave;
       this.waveDelay = WAVE_RESPAWN_DELAY;
-      this.waveAnnouncement = `Wave ${this.currentWave} incoming...`;
+
+      // Track kills from cleared waves in endless mode
+      if (this.isEndlessMode) {
+        this.endlessBestWave = this.currentWave - 1;
+        this.endlessScore += endlessWaveScore(this.currentWave - 1);
+        // Grant credits for each wave cleared
+        const waveCredits = endlessWaveCredits(this.currentWave - 1);
+        this.onReward(this.encounterId, { credits: waveCredits, score: this.endlessScore, victory: true });
+      }
+
+      this.waveAnnouncement = this.isEndlessMode
+        ? `Wave ${this.currentWave} incoming...`
+        : `Wave ${this.currentWave} incoming...`;
+    }
+
+    // Endless mode: never declare victory, just keep going
+    if (progress.outcome === 'victory' && this.isEndlessMode) {
+      // This means all preset waves cleared (shouldn't happen in endless, but guard)
+      this.encounterOutcome = 'continue';
+      return;
     }
 
     if (progress.outcome === 'victory') {
@@ -1212,7 +1294,14 @@ export class FlightScene {
       }
     }
     if (progress.outcome === 'defeat') {
-      this.waveAnnouncement = 'Player ship disabled';
+      if (this.isEndlessMode) {
+        // Count enemies killed this wave
+        const waveEnemies = this.waves[this.currentWave - 1]?.enemies.length ?? 0;
+        this.endlessScore += endlessWaveScore(this.currentWave);
+        this.waveAnnouncement = `Wave ${this.currentWave} · defeated after ${this.endlessTotalKills} kills`;
+      } else {
+        this.waveAnnouncement = 'Player ship disabled';
+      }
     }
   }
 
@@ -1516,7 +1605,7 @@ export class FlightScene {
     hud.innerHTML = `
       <div class="hud-grid">
         <div><span>Ship</span><strong>${this.player.blueprint.name}</strong></div>
-        <div><span>Wave</span><strong>${this.currentWave} / ${this.waves.length}</strong></div>
+        <div><span>Wave</span><strong>${this.currentWave}${this.isEndlessMode ? '' : ` / ${this.waves.length}`}</strong></div>
         <div><span>Hull</span><strong>${Math.max(0, this.player.hp).toFixed(0)} / ${this.player.stats.maxHp.toFixed(0)}</strong></div>
         ${this.player.maxShield > 0 ? `<div><span>Shield</span><strong>${Math.max(0, this.player.shield).toFixed(0)} / ${this.player.maxShield.toFixed(0)}</strong></div>` : ''}
         <div><span>Heat</span><strong>${this.player.heat.toFixed(0)} / ${this.player.stats.heatCapacity.toFixed(0)}</strong></div>
@@ -1527,6 +1616,8 @@ export class FlightScene {
         <div><span>Drones</span><strong>${activeDrones} / ${totalDrones}</strong></div>
         ${this.encounterObjective.type === 'protect_ally' ? `<div><span>Convoy Hull</span><strong>${convoyStatus}</strong></div>` : ''}
         ${this.encounterObjective.type === 'protect_ally' ? `<div><span>Convoy Progress</span><strong>${(convoyProgress * 100).toFixed(0)}%</strong></div>` : ''}
+        ${this.isEndlessMode ? `<div><span>Kills</span><strong>${this.endlessTotalKills}</strong></div>` : ''}
+        ${this.isEndlessMode ? `<div><span>Score</span><strong>${this.endlessScore.toLocaleString()}</strong></div>` : ''}
       </div>
       <div class="ability-bar">
         ${this.renderAbilitySlot(this.player.abilities[0], '1', '🛡')}
@@ -1541,14 +1632,20 @@ export class FlightScene {
       ${this.encounterObjective.type === 'protect_ally' ? `<div class="meter"><span style="width:${Math.min(100, convoyProgress * 100)}%; background:linear-gradient(90deg,#67e8f9,#22d3ee)"></span></div>` : ''}
       <p class="muted">${this.encounterObjective.label}</p>
       <p class="muted">${this.waveAnnouncement}</p>
-      ${!this.player.alive ? '<p class="warning">Your ship is disabled. Reset or return to the editor.</p>' : ''}
-      ${this.encounterOutcome === 'victory' ? '<p class="success">Encounter cleared. Return to the editor or reset for another run.</p>' : ''}
+      ${!this.player.alive
+        ? this.isEndlessMode
+          ? `<p class="warning">Ship disabled · Wave ${this.currentWave} · ${this.endlessTotalKills} kills · Score: ${this.endlessScore.toLocaleString()}</p>`
+          : '<p class="warning">Your ship is disabled. Reset or return to the editor.</p>'
+        : ''}
+      ${this.encounterOutcome === 'victory' && !this.isEndlessMode ? '<p class="success">Encounter cleared. Return to the editor or reset for another run.</p>' : ''}
     `;
 
     if (debrief) {
-      if (this.encounterOutcome === 'continue') {
+      if (this.encounterOutcome === 'continue' && !this.isEndlessMode) {
         debrief.innerHTML = '';
-      } else {
+      } else if (this.isEndlessMode && (this.encounterOutcome === 'defeat' || !this.player.alive)) {
+        debrief.innerHTML = `<strong>Run Over</strong><br>Wave ${this.currentWave} · ${this.endlessTotalKills} kills<br>Score: ${this.endlessScore.toLocaleString()}<br>Best wave: ${this.endlessBestWave}`;
+      } else if (this.encounterOutcome !== 'continue') {
         const report = buildEncounterDebrief({
           encounterName: this.encounterId,
           objectiveLabel: this.encounterObjective.label,
@@ -1559,6 +1656,50 @@ export class FlightScene {
         });
         debrief.innerHTML = `<strong>${report.title}</strong><br>${report.lines.join('<br>')}`;
       }
+    }
+  }
+
+  private updateThrustTrails(dt: number): void {
+    this.thrustTimer -= dt;
+    if (this.thrustTimer > 0) return;
+    this.thrustTimer = 0.04; // emit every 40ms
+
+    for (const ship of this.ships) {
+      if (!ship.alive) continue;
+
+      // Only emit if the ship has velocity (is moving)
+      const speed = ship.velocity.length();
+      if (speed < 0.5) continue;
+
+      const isThrusting = ship === this.player
+        ? (this.keys.has('KeyW') || this.keys.has('KeyS') || this.keys.has('KeyA') || this.keys.has('KeyD'))
+        : speed > 2;
+
+      if (!isThrusting) continue;
+
+      const backDirection = new THREE.Vector3(
+        -Math.sin(ship.rotation),
+        0,
+        -Math.cos(ship.rotation),
+      );
+      const afterburning = isAfterburning(ship.abilities);
+      this.particles.emit(ParticleSystem.thrustTrail(ship.position, backDirection, afterburning));
+    }
+  }
+
+  private updateScreenShake(dt: number): void {
+    if (!this.screenShake) return;
+
+    const basePos = new THREE.Vector3(
+      this.player.position.x,
+      20,
+      this.player.position.z + 0.001,
+    );
+
+    updateScreenShake(this.screenShake, this.camera, basePos, dt);
+
+    if (this.screenShake.remaining <= 0) {
+      this.screenShake = null;
     }
   }
 

@@ -240,6 +240,7 @@ export class EditorScene {
         <h2>Encounter</h2>
         <div class="encounter-grid">
           ${ENCOUNTER_PRESETS.map((preset) => `<button class="encounter-button" data-encounter="${preset.id}" title="${preset.description}">${preset.displayName}</button>`).join('')}
+          <button class="encounter-button" data-encounter="endless" title="Infinite procedurally-generated waves with escalating difficulty. Earn credits and push your limits." style="border-color:rgba(251,191,36,0.5);">∞ Endless Gauntlet</button>
         </div>
         <div id="encounter-briefing" class="muted"></div>
         <h2>Hangar</h2>
@@ -416,10 +417,11 @@ export class EditorScene {
     if (progressionEl) {
       const bestScore = this.progression.bestEncounterScores[this.selectedEncounterId] ?? 0;
       const completed = this.progression.completedEncounterIds.includes(this.selectedEncounterId);
+      const isEndless = this.selectedEncounterId === 'endless';
       progressionEl.innerHTML = `
         <div class="progression-pill"><span>Credits</span><strong>${this.progression.credits}</strong></div>
         <div class="progression-pill"><span>Completed Encounters</span><strong>${this.progression.completedEncounterIds.length}</strong></div>
-        <div class="progression-pill"><span>${completed ? 'Best Score' : 'Target Encounter'}</span><strong>${completed ? bestScore : this.selectedEncounterId}</strong></div>
+        <div class="progression-pill"><span>${isEndless ? 'Endless' : completed ? 'Best Score' : 'Target Encounter'}</span><strong>${isEndless ? '∞ waves' : completed ? bestScore : this.selectedEncounterId}</strong></div>
       `;
     }
     if (statsEl) {
@@ -467,8 +469,12 @@ export class EditorScene {
         : `<span class="warning">${validation.issues.join(' ')}</span>`;
     }
     const encounterPreset = ENCOUNTER_PRESETS.find((preset) => preset.id === this.selectedEncounterId);
-    if (encounterBriefingEl && encounterPreset) {
-      encounterBriefingEl.innerHTML = `<strong>${encounterPreset.objective.label}</strong> · ${encounterPreset.description}`;
+    if (encounterBriefingEl) {
+      if (this.selectedEncounterId === 'endless') {
+        encounterBriefingEl.innerHTML = `<strong>Endless Gauntlet</strong> · Infinite procedurally-generated waves with escalating difficulty. Every 5th wave is a boss. Earn credits per wave cleared.`;
+      } else if (encounterPreset) {
+        encounterBriefingEl.innerHTML = `<strong>${encounterPreset.objective.label}</strong> · ${encounterPreset.description}`;
+      }
     }
     if (hangarEl) {
       hangarEl.innerHTML = this.hangarEntries.length === 0
