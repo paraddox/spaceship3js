@@ -203,6 +203,96 @@ ul {
   background: linear-gradient(90deg, #0ea5e9, #38bdf8);
 }
 
+.minimap-container {
+  width: 180px;
+  height: 180px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2px solid rgba(56, 189, 248, 0.35);
+  background: rgba(2, 6, 23, 0.75);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 0 20px rgba(14, 165, 233, 0.12);
+  margin-top: 10px;
+}
+.minimap-container canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* ── Ability Bar ────────────────────────────────────────── */
+.ability-bar {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.ability-slot {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  background: rgba(30, 41, 59, 0.7);
+  border: 2px solid rgba(148, 163, 184, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.ability-slot.ready {
+  border-color: rgba(74, 222, 128, 0.45);
+  background: rgba(30, 41, 59, 0.7);
+}
+
+.ability-slot.active {
+  border-color: rgba(56, 189, 248, 0.8);
+  background: rgba(14, 165, 233, 0.15);
+  box-shadow: 0 0 12px rgba(14, 165, 233, 0.25);
+}
+
+.ability-slot.cooldown {
+  border-color: rgba(148, 163, 184, 0.15);
+  background: rgba(30, 41, 59, 0.4);
+}
+
+.ability-slot.unavailable {
+  border-color: rgba(71, 85, 105, 0.2);
+  background: rgba(15, 23, 42, 0.4);
+  opacity: 0.4;
+}
+
+.ability-key {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: 0.65rem;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.ability-icon {
+  font-size: 1.3rem;
+  filter: drop-shadow(0 0 4px rgba(255,255,255,0.15));
+}
+
+.ability-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 100%;
+  pointer-events: none;
+}
+
+.ability-fill.active-fill {
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.25), rgba(14, 165, 233, 0.1));
+}
+
+.ability-fill.cooldown-fill {
+  background: rgba(74, 222, 128, 0.12);
+}
+
 @media (max-width: 900px) {
   .module-grid, .stats-grid, .hud-grid { grid-template-columns: 1fr; }
   .panel, .compact-panel { width: calc(100vw - 24px); }

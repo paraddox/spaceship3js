@@ -259,3 +259,98 @@ export function damageModules(
 }
 
 const SQRT3 = Math.sqrt(3);
+
+// ── Active Combat Abilities ──────────────────────────────────────────
+
+export type AbilityId = 'shield_boost' | 'afterburner' | 'overcharge' | 'emergency_repair';
+
+export interface AbilityDef {
+  id: AbilityId;
+  displayName: string;
+  icon: string; // single character for HUD
+  sourceCategory: string; // module category that grants this ability
+  duration: number; // seconds the effect lasts (0 = instant)
+  cooldown: number; // seconds before reuse
+}
+
+export interface AbilityRuntime {
+  def: AbilityDef;
+  cooldownRemaining: number;
+  activeRemaining: number; // >0 while ability is active
+  available: boolean; // false when source module is destroyed
+}
+
+export const ABILITY_DEFS: AbilityDef[] = [
+  { id: 'shield_boost', displayName: 'Shield Boost', icon: '🛡', sourceCategory: 'shield', duration: 3, cooldown: 12 },
+  { id: 'afterburner', displayName: 'Afterburner', icon: '🔥', sourceCategory: 'engine', duration: 2, cooldown: 8 },
+  { id: 'overcharge', displayName: 'Overcharge', icon: '⚡', sourceCategory: 'reactor', duration: 4, cooldown: 10 },
+  { id: 'emergency_repair', displayName: 'Repair', icon: '🔧', sourceCategory: 'bridge', duration: 0, cooldown: 20 },
+];
+
+const ABILITY_BY_ID = Object.fromEntries(ABILITY_DEFS.map((d) => [d.id, d])) as Record<AbilityId, AbilityDef>;
+
+/**
+ * Build ability runtime states from a blueprint's modules.
+ * Each ability is available if at least one module of its source category exists.
+ */
+export function buildAbilities(categories: Set<string>): AbilityRuntime[] {
+  return ABILITY_DEFS.map((def) => ({
+    def,
+    cooldownRemaining: 0,
+    activeRemaining: 0,
+    available: categories.has(def.sourceCategory),
+  }));
+}
+
+/**
+ * Advance ability cooldowns and active timers. Returns true if any changed.
+ */
+export function tickAbilities(abilities: AbilityRuntime[], dt: number): boolean {
+  let changed = false;
+  for (const ability of abilities) {
+    if (ability.cooldownRemaining > 0) {
+      ability.cooldownRemaining = Math.max(0, ability.cooldownRemaining - dt);
+      changed = true;
+    }
+    if (ability.activeRemaining > 0) {
+      ability.activeRemaining = Math.max(0, ability.activeRemaining - dt);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
+ * Try to activate an ability. Returns true if successfully activated.
+ */
+export function activateAbility(abilities: AbilityRuntime[], id: AbilityId): boolean {
+  const ability = abilities.find((a) => a.def.id === id);
+  if (!ability || !ability.available || ability.cooldownRemaining > 0 || ability.activeRemaining > 0) return false;
+  ability.activeRemaining = ability.def.duration;
+  ability.cooldownRemaining = ability.def.duration + ability.def.cooldown;
+  return true;
+}
+
+export function isAbilityActive(abilities: AbilityRuntime[], id: AbilityId): boolean {
+  const remaining = abilities.find((a) => a.def.id === id)?.activeRemaining;
+  return (remaining ?? 0) > 0;
+}
+
+export function isShieldBoosted(abilities: AbilityRuntime[]): boolean {
+  return isAbilityActive(abilities, 'shield_boost');
+}
+
+export function isAfterburning(abilities: AbilityRuntime[]): boolean {
+  return isAbilityActive(abilities, 'afterburner');
+}
+
+export function isOvercharged(abilities: AbilityRuntime[]): boolean {
+  return isAbilityActive(abilities, 'overcharge');
+}
+
+export function getRepairTarget(moduleStates: ModuleRuntimeState[]): ModuleRuntimeState | null {
+  const damaged = moduleStates
+    .filter((m) => !m.destroyed && m.currentHp < m.maxHp)
+    .sort((a, b) => (a.currentHp / a.maxHp) - (b.currentHp / b.maxHp));
+  return damaged[0] ?? null;
+}

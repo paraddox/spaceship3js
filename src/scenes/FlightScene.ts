@@ -24,18 +24,34 @@ import { advanceProtectedAlly, chooseEnemyPriorityTarget, computeEscortProgress 
 import { advanceEffect, createBeamEffect, createExplosionEffect, createImpactEffect, type CombatEffectState } from '../game/effects';
 import { playShoot, playLaser, playHit, playExplosion, playMissile, playBeam, resumeAudio } from '../game/audio';
 import {
+  computeFlankSeed,
+  computeTacticalDecision,
+  evaluateStance,
+  type TacticalContext,
+  type TacticalDecision,
+} from '../game/tactical-ai';
+import {
   advanceEncounterState,
   computeCoolingPerSecond,
   computePowerFactor,
   damageModules,
   getEffectiveThrust,
   getEffectiveWeaponCadence,
+  getRepairTarget,
+  isAfterburning,
+  isOvercharged,
+  isShieldBoosted,
   isOverheated,
   rechargeShield,
   resolveDamage,
+  tickAbilities,
+  activateAbility,
+  buildAbilities,
   type DamageResult,
   type EncounterState,
   type ModuleRuntimeState,
+  type AbilityId,
+  type AbilityRuntime,
 } from '../game/simulation';
 
 interface FlightSceneOptions {
@@ -73,6 +89,7 @@ interface RuntimeShip {
   powerFactor: number;
   moduleStates: ModuleRuntimeState[];
   moduleMeshes: Map<string, THREE.Mesh>;
+  abilities: AbilityRuntime[];
 }
 
 interface Projectile {
@@ -139,6 +156,8 @@ export class FlightScene {
   private encounterId: string;
   private encounterObjective!: EncounterObjective;
   private elapsedEncounterSeconds = 0;
+  private minimapCanvas: HTMLCanvasElement | null = null;
+  private minimapCtx: CanvasRenderingContext2D | null = null;
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
@@ -193,10 +212,32 @@ export class FlightScene {
     this.updateProjectiles(dt);
     this.updateEffects(dt);
     this.coolShips(dt);
+    this.updateAbilities(dt);
     this.updateHealthBars();
     this.updateEncounterState();
     this.refreshHud();
     this.renderer.render(this.scene, this.camera);
+  }
+
+  private updateAbilities(dt: number): void {
+    for (const ship of this.ships) {
+      tickAbilities(ship.abilities, dt);
+
+      // Apply enemy emergency repair on activation frame
+      // (duration=0, so activeRemaining is 0 after tick — detect via fresh cooldown)
+      if (ship.team === 'enemy') {
+        const repairAbility = ship.abilities.find((a) => a.def.id === 'emergency_repair');
+        if (repairAbility && repairAbility.cooldownRemaining > 0 &&
+            repairAbility.activeRemaining <= 0 &&
+            repairAbility.cooldownRemaining > repairAbility.def.cooldown - 0.1) {
+          const repairTarget = getRepairTarget(ship.moduleStates);
+          if (repairTarget) {
+            repairTarget.currentHp = Math.min(repairTarget.maxHp, repairTarget.currentHp + repairTarget.maxHp * 0.25);
+            ship.hp = ship.moduleStates.filter((m) => !m.destroyed).reduce((sum, m) => sum + m.currentHp, 0);
+          }
+        }
+      }
+    }
   }
 
   resize(width: number, height: number): void {
@@ -240,6 +281,11 @@ export class FlightScene {
           <button data-action="reset">Reset Encounter</button>
         </div>
       </div>
+      <div class="overlay bottom-left" style="pointer-events:none;">
+        <div class="minimap-container">
+          <canvas id="minimap-canvas" width="360" height="360"></canvas>
+        </div>
+      </div>
       <div class="overlay bottom-right panel compact-panel">
         <strong>Controls</strong>
         <ul>
@@ -247,10 +293,17 @@ export class FlightScene {
           <li>A/D: strafe and orbit</li>
           <li>Mouse: aim ship</li>
           <li>Hold left click: fire</li>
-          <li>Heat and power now affect performance</li>
+          <li>1: Shield Boost · 2: Afterburner</li>
+          <li>3: Overcharge · 4: Emergency Repair</li>
         </ul>
       </div>
     `;
+
+    const canvas = this.uiRoot.querySelector('#minimap-canvas') as HTMLCanvasElement | null;
+    if (canvas) {
+      this.minimapCanvas = canvas;
+      this.minimapCtx = canvas.getContext('2d');
+    }
 
     this.uiRoot.querySelector('[data-action="return-editor"]')?.addEventListener('click', () => {
       this.onBack(cloneBlueprint(this.player.blueprint));
@@ -450,6 +503,10 @@ export class FlightScene {
       }
     }
 
+    const abilities = buildAbilities(
+      new Set(blueprint.modules.map((m) => getModuleDefinition(m.definitionId).category)),
+    );
+
     return {
       id,
       team,
@@ -475,6 +532,7 @@ export class FlightScene {
       powerFactor,
       moduleStates,
       moduleMeshes,
+      abilities,
     };
   }
 
@@ -495,7 +553,7 @@ export class FlightScene {
       this.player.powerFactor,
       this.player.heat,
       this.player.stats.heatCapacity,
-    );
+    ) * (isAfterburning(this.player.abilities) ? 2.5 : 1);
 
     const acceleration = forward
       .multiplyScalar(forwardInput * effectiveThrust)
@@ -509,7 +567,49 @@ export class FlightScene {
       this.tryFire(this.player, this.mouseWorld.clone().sub(this.player.position).normalize());
     }
 
+    // ── Ability hotkeys ──
+    this.tryPlayerAbility('Digit1', 'shield_boost');
+    this.tryPlayerAbility('Digit2', 'afterburner');
+    this.tryPlayerAbility('Digit3', 'overcharge');
+    this.tryPlayerAbility('Digit4', 'emergency_repair');
+
     this.syncShipTransform(this.player);
+  }
+
+  private tryPlayerAbility(keyCode: string, abilityId: AbilityId): void {
+    if (!this.keys.has(keyCode)) return;
+    if (activateAbility(this.player.abilities, abilityId)) {
+      // Handle emergency repair immediately
+      if (abilityId === 'emergency_repair') {
+        const target = getRepairTarget(this.player.moduleStates);
+        if (target) {
+          const repairAmount = target.maxHp * 0.25;
+          target.currentHp = Math.min(target.maxHp, target.currentHp + repairAmount);
+          this.player.hp = this.player.moduleStates.filter((m) => !m.destroyed).reduce((sum, m) => sum + m.currentHp, 0);
+          // Restore the module mesh color
+          this.restoreModuleMesh(this.player, target.instanceId);
+          this.waveAnnouncement = `Repairing ${getModuleDefinition(target.definitionId).displayName}`;
+        }
+      }
+    }
+  }
+
+  private restoreModuleMesh(ship: RuntimeShip, instanceId: string): void {
+    for (const key of Array.from(ship.moduleMeshes.keys())) {
+      if (key.startsWith(instanceId + ':')) {
+        const mesh = ship.moduleMeshes.get(key);
+        if (mesh && mesh.material instanceof THREE.MeshStandardMaterial) {
+          const def = getModuleDefinition(
+            ship.moduleStates.find((m) => m.instanceId === instanceId)?.definitionId ?? '',
+          );
+          mesh.material.color.set(def.color);
+          mesh.material.emissive.set(def.color);
+          mesh.material.emissiveIntensity = 0.08;
+          mesh.material.opacity = 1;
+          mesh.material.transparent = false;
+        }
+      }
+    }
   }
 
   private updateProtectedAllies(dt: number): void {
@@ -539,36 +639,86 @@ export class FlightScene {
   }
 
   private updateEnemies(dt: number): void {
-    for (const enemy of this.ships.filter((ship) => ship.team === 'enemy' && ship.alive)) {
+    const livingEnemies = this.ships.filter((ship) => ship.team === 'enemy' && ship.alive);
+    const totalLiving = livingEnemies.length;
+
+    for (let ei = 0; ei < livingEnemies.length; ei++) {
+      const enemy = livingEnemies[ei];
       const target = this.getEnemyPriorityTarget(enemy);
       const toTarget = target.position.clone().sub(enemy.position);
       const distance = toTarget.length();
-      const direction = toTarget.normalize();
+      const direction = toTarget.clone().normalize();
       const side = new THREE.Vector3(-direction.z, 0, direction.x);
-      const targetRotation = Math.atan2(target.position.x - enemy.position.x, target.position.z - enemy.position.z);
-      enemy.rotation = lerpAngle(enemy.rotation, targetRotation, Math.min(1, dt * 4));
 
-      const rangeError = distance - enemy.preferredRange;
-      const advance = THREE.MathUtils.clamp(rangeError * 0.6, -3, 3);
-      const drift = Math.sin(performance.now() * 0.001 + enemy.fireJitter * 10) * 1.8;
+      // ── Tactical AI evaluation ──
+      const totalModules = enemy.blueprint.modules.length;
+      const destroyedModules = enemy.moduleStates.filter((m) => m.destroyed).length;
+      const ctx: TacticalContext = {
+        ownHpRatio: enemy.hp / Math.max(1, enemy.stats.maxHp),
+        ownShieldRatio: enemy.maxShield > 0 ? enemy.shield / enemy.maxShield : 0,
+        ownShieldMax: enemy.maxShield,
+        moduleLossRatio: totalModules > 0 ? destroyedModules / totalModules : 0,
+        distanceToTarget: distance,
+        preferredRange: enemy.preferredRange,
+        hasMissiles: enemy.weapons.some((w) => w.archetype === 'missile'),
+        hasBeam: enemy.weapons.some((w) => w.archetype === 'beam'),
+        allyCount: totalLiving - 1,
+        engineIntact: enemy.moduleStates.some((m) => m.category === 'engine' && !m.destroyed),
+        targetHpRatio: target.hp / Math.max(1, target.stats.maxHp),
+        weaponCount: enemy.weapons.length,
+      };
+
+      const stance = evaluateStance(ctx);
+      const flankSeed = computeFlankSeed(ei, totalLiving);
+      const decision: TacticalDecision = computeTacticalDecision(stance, ctx, flankSeed);
+
+      // ── Ability usage (enemies) ──
+      if (decision.abilityToUse) {
+        activateAbility(enemy.abilities, decision.abilityToUse);
+      }
+
+      // ── Movement based on stance ──
+      const targetRotation = Math.atan2(target.position.x - enemy.position.x, target.position.z - enemy.position.z);
+
+      // Retreating enemies face AWAY from target
+      const faceTarget = stance === 'retreating' ? targetRotation + Math.PI : targetRotation;
+      const rotationSpeed = stance === 'retreating' ? 6 : 4;
+      enemy.rotation = lerpAngle(enemy.rotation, faceTarget, Math.min(1, dt * rotationSpeed));
+
+      const rangeError = distance - decision.desiredDistance;
+      const advance = THREE.MathUtils.clamp(rangeError * 0.5, -3.5, 3.5);
+
+      // Lateral movement: flank spread + organic drift
+      const baseDrift = Math.sin(performance.now() * 0.0008 + ei * 2.7) * 1.2;
+      const lateralThrust = (decision.lateralBias * 2.5 + baseDrift);
+
       const effectiveThrust = getEffectiveThrust(
         Math.max(3.5, enemy.stats.thrust / 80),
         enemy.powerFactor,
         enemy.heat,
         enemy.stats.heatCapacity,
-      );
+      ) * (isAfterburning(enemy.abilities) ? 1.8 : 1);
 
-      enemy.velocity.addScaledVector(direction, advance * effectiveThrust * dt * 0.35);
-      enemy.velocity.addScaledVector(side, drift * dt * 0.8);
-      enemy.velocity.multiplyScalar(0.982);
+      // Aggressive enemies commit harder to forward movement
+      const forwardCommit = stance === 'aggressive' ? 0.45 : stance === 'retreating' ? 0.25 : 0.35;
+
+      enemy.velocity.addScaledVector(direction, advance * effectiveThrust * dt * forwardCommit);
+      enemy.velocity.addScaledVector(side, lateralThrust * dt * 0.7);
+      enemy.velocity.multiplyScalar(stance === 'retreating' ? 0.988 : 0.982);
       enemy.position.addScaledVector(enemy.velocity, dt);
       this.clampToArena(enemy.position);
 
-      if (distance <= Math.max(enemy.stats.weaponRange / 32, enemy.preferredRange + 4)) {
+      // ── Firing based on urgency ──
+      const effectiveRange = Math.max(enemy.stats.weaponRange / 32, enemy.preferredRange + 4);
+      if (distance <= effectiveRange && Math.random() < decision.fireUrgency) {
+        // Cautious/retreating enemies have more aim jitter
+        const jitterScale = stance === 'cautious' || stance === 'retreating'
+          ? enemy.fireJitter * 1.6
+          : enemy.fireJitter;
         const jitter = new THREE.Vector3(
-          (Math.random() - 0.5) * enemy.fireJitter,
+          (Math.random() - 0.5) * jitterScale,
           0,
-          (Math.random() - 0.5) * enemy.fireJitter,
+          (Math.random() - 0.5) * jitterScale,
         );
         this.tryFire(enemy, target.position.clone().add(jitter).sub(enemy.position).normalize());
       }
@@ -974,7 +1124,12 @@ export class FlightScene {
       ship.cooldown = Math.max(0, ship.cooldown - dt);
       const cooling = computeCoolingPerSecond(Math.max(2, ship.stats.cooling * 80), ship.powerFactor);
       ship.heat = Math.max(0, ship.heat - cooling * dt);
-      ship.shield = rechargeShield(ship.shield, ship.maxShield, ship.stats.shieldRecharge, dt);
+      ship.shield = rechargeShield(
+        ship.shield,
+        ship.maxShield,
+        ship.stats.shieldRecharge * (isShieldBoosted(ship.abilities) ? 2 : 1),
+        dt,
+      );
     }
   }
 
@@ -1188,6 +1343,156 @@ export class FlightScene {
     position.setLength(ARENA_RADIUS - 1);
   }
 
+  private updateMinimap(): void {
+    const ctx = this.minimapCtx;
+    const canvas = this.minimapCanvas;
+    if (!ctx || !canvas) return;
+
+    const w = canvas.width;
+    const h = canvas.height;
+    const cx = w / 2;
+    const cy = h / 2;
+    const scale = (w / 2 - 8) / ARENA_RADIUS;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // Dark background with subtle radial gradient
+    const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, w / 2);
+    bg.addColorStop(0, 'rgba(8, 20, 36, 0.6)');
+    bg.addColorStop(1, 'rgba(2, 6, 23, 0.9)');
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    ctx.arc(cx, cy, w / 2 - 1, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Arena boundary ring
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.2)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ARENA_RADIUS * scale, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Crosshair grid lines
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.07)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - ARENA_RADIUS * scale);
+    ctx.lineTo(cx, cy + ARENA_RADIUS * scale);
+    ctx.moveTo(cx - ARENA_RADIUS * scale, cy);
+    ctx.lineTo(cx + ARENA_RADIUS * scale, cy);
+    ctx.stroke();
+
+    // Weapon range circle
+    if (this.player.alive) {
+      const rangeRadius = Math.max(1, this.player.stats.weaponRange / 32) * scale;
+      ctx.strokeStyle = 'rgba(74, 222, 128, 0.18)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.arc(cx, cy, rangeRadius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Extraction point for escort missions
+    if (this.encounterObjective.type === 'protect_ally') {
+      const ex = cx + ESCORT_EXTRACTION_POINT.x * scale;
+      const ey = cy + ESCORT_EXTRACTION_POINT.z * scale;
+      ctx.strokeStyle = 'rgba(103, 232, 249, 0.35)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(ex, ey, 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(103, 232, 249, 0.15)';
+      ctx.fill();
+    }
+
+    // Drones
+    for (const drone of this.drones) {
+      if (!drone.state.active) continue;
+      const dx = cx + drone.state.x * scale;
+      const dy = cy + drone.state.z * scale;
+      ctx.fillStyle = drone.state.team === 'player' ? 'rgba(147, 197, 253, 0.7)' : 'rgba(251, 113, 133, 0.7)';
+      ctx.beginPath();
+      ctx.arc(dx, dy, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Ships
+    for (const ship of this.ships) {
+      if (!ship.alive) continue;
+      const sx = cx + ship.position.x * scale;
+      const sy = cy + ship.position.z * scale;
+
+      if (ship.id === this.player.id) {
+        // Player: white triangle with heading
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(-ship.rotation);
+        ctx.fillStyle = '#e2e8f0';
+        ctx.beginPath();
+        ctx.moveTo(0, -7);
+        ctx.lineTo(-5, 5);
+        ctx.lineTo(5, 5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        // Shield ring around player
+        if (ship.maxShield > 0 && ship.shield > 0) {
+          const shieldRatio = ship.shield / ship.maxShield;
+          const shieldR = ship.radius * scale * 0.6;
+          ctx.strokeStyle = `rgba(56, 189, 248, ${0.3 + shieldRatio * 0.4})`;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sx, sy, shieldR, 0, Math.PI * 2 * shieldRatio);
+          ctx.stroke();
+        }
+      } else if (ship.team === 'enemy') {
+        // Enemy: red dot with HP ring
+        const hpRatio = ship.hp / Math.max(1, ship.stats.maxHp);
+        const r = 4;
+        ctx.fillStyle = `rgba(248, 113, 113, ${0.5 + hpRatio * 0.5})`;
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fill();
+        // HP ring
+        if (hpRatio < 1) {
+          ctx.strokeStyle = hpRatio > 0.5 ? 'rgba(248, 113, 113, 0.4)' : 'rgba(239, 68, 68, 0.6)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(sx, sy, r + 2.5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * hpRatio);
+          ctx.stroke();
+        }
+      } else if (ship.protectedTarget) {
+        // Protected ally: cyan diamond
+        ctx.fillStyle = 'rgba(103, 232, 249, 0.9)';
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillRect(-4, -4, 8, 8);
+        ctx.restore();
+
+        // HP indicator
+        const hpRatio = ship.hp / Math.max(1, ship.stats.maxHp);
+        ctx.strokeStyle = `rgba(103, 232, 249, ${0.4 + hpRatio * 0.4})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 8, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * hpRatio);
+        ctx.stroke();
+      }
+    }
+
+    // Outer rim overlay (vignette)
+    const rim = ctx.createRadialGradient(cx, cy, w / 2 - 20, cx, cy, w / 2);
+    rim.addColorStop(0, 'rgba(2, 6, 23, 0)');
+    rim.addColorStop(1, 'rgba(2, 6, 23, 0.7)');
+    ctx.fillStyle = rim;
+    ctx.beginPath();
+    ctx.arc(cx, cy, w / 2 - 1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   private refreshHud(): void {
     const hud = this.uiRoot.querySelector('#flight-hud');
     const debrief = this.uiRoot.querySelector('#flight-debrief');
@@ -1223,6 +1528,12 @@ export class FlightScene {
         ${this.encounterObjective.type === 'protect_ally' ? `<div><span>Convoy Hull</span><strong>${convoyStatus}</strong></div>` : ''}
         ${this.encounterObjective.type === 'protect_ally' ? `<div><span>Convoy Progress</span><strong>${(convoyProgress * 100).toFixed(0)}%</strong></div>` : ''}
       </div>
+      <div class="ability-bar">
+        ${this.renderAbilitySlot(this.player.abilities[0], '1', '🛡')}
+        ${this.renderAbilitySlot(this.player.abilities[1], '2', '🔥')}
+        ${this.renderAbilitySlot(this.player.abilities[2], '3', '⚡')}
+        ${this.renderAbilitySlot(this.player.abilities[3], '4', '🔧')}
+      </div>
       <p class="muted">Crew ${crewSummary}</p>
       ${this.player.maxShield > 0 ? `<div class="meter shield"><span style="width:${shieldRatio * 100}%"></span></div>` : ''}
       <div class="meter"><span style="width:${hpRatio * 100}%"></span></div>
@@ -1257,6 +1568,32 @@ export class FlightScene {
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
     this.raycaster.ray.intersectPlane(this.groundPlane, this.mouseWorld);
+  }
+
+  private renderAbilitySlot(ability: AbilityRuntime, key: string, icon: string): string {
+    if (!ability) return '';
+    const onCooldown = ability.cooldownRemaining > 0;
+    const isActive = ability.activeRemaining > 0;
+    const isUnavailable = !ability.available;
+    let stateClass = 'ready';
+    let cooldownPct = '';
+    if (isUnavailable) {
+      stateClass = 'unavailable';
+    } else if (isActive) {
+      stateClass = 'active';
+      const pct = Math.max(0, (ability.activeRemaining / ability.def.duration) * 100);
+      cooldownPct = `<span class="ability-fill active-fill" style="width:${pct}%"></span>`;
+    } else if (onCooldown) {
+      stateClass = 'cooldown';
+      const totalCd = ability.def.duration + ability.def.cooldown;
+      const pct = Math.max(0, (ability.cooldownRemaining / totalCd) * 100);
+      cooldownPct = `<span class="ability-fill cooldown-fill" style="width:${100 - (ability.cooldownRemaining / totalCd) * 100}%"></span>`;
+    }
+    return `<div class="ability-slot ${stateClass}" title="${ability.def.displayName} [${key}]${isUnavailable ? ' — no module' : ''}">
+      <span class="ability-key">${key}</span>
+      <span class="ability-icon">${icon}</span>
+      ${cooldownPct}
+    </div>`;
   }
 }
 
