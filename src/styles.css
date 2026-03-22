@@ -199,6 +199,9 @@ ul {
 .meter.heat span {
   background: linear-gradient(90deg, #f59e0b, #ef4444);
 }
+.meter.shield span {
+  background: linear-gradient(90deg, #0ea5e9, #38bdf8);
+}
 
 @media (max-width: 900px) {
   .module-grid, .stats-grid, .hud-grid { grid-template-columns: 1fr; }

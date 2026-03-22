@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { lerpAngle } from '../core/hex';
-import type { ShipBlueprint, ShipStats } from '../core/types';
+import type { ShipBlueprint, ShipStats, DamageType } from '../core/types';
 import { applyCrewModifiers, DEFAULT_CREW_ALLOCATION } from '../game/crew';
 import { ENCOUNTER_PRESETS, getEncounterPreset, type EncounterWave } from '../game/encounters';
 import { buildShipGroup, computeBlueprintRadius } from '../rendering/shipFactory';
@@ -30,6 +30,9 @@ import {
   getEffectiveThrust,
   getEffectiveWeaponCadence,
   isOverheated,
+  rechargeShield,
+  resolveDamage,
+  type DamageResult,
   type EncounterState,
 } from '../game/simulation';
 
@@ -59,6 +62,8 @@ interface RuntimeShip {
   hp: number;
   heat: number;
   cooldown: number;
+  shield: number;
+  maxShield: number;
   radius: number;
   preferredRange: number;
   fireJitter: number;
@@ -73,6 +78,8 @@ interface Projectile {
   ttl: number;
   team: 'player' | 'enemy';
   archetype: WeaponProfile['archetype'];
+  damageType: DamageType;
+  armorPenetration: number;
   turnRate: number;
   target: RuntimeShip | null;
   active: boolean;
@@ -109,7 +116,7 @@ export class FlightScene {
   private readonly projectileGroup = new THREE.Group();
   private readonly effectGroup = new THREE.Group();
   private readonly healthBarGroup = new THREE.Group();
-  private readonly shipHealthBars = new Map<string, { bg: THREE.Mesh; fg: THREE.Mesh }>();
+  private readonly shipHealthBars = new Map<string, { bg: THREE.Mesh; fg: THREE.Mesh; shieldBg: THREE.Mesh; shieldFg: THREE.Mesh }>();
   private readonly ships: RuntimeShip[] = [];
   private readonly drones: RuntimeDrone[] = [];
   private readonly projectiles: Projectile[] = [];
@@ -326,6 +333,8 @@ export class FlightScene {
         ttl: 0,
         team: 'player',
         archetype: 'projectile',
+        damageType: 'kinetic',
+        armorPenetration: 0,
         turnRate: 0,
         target: null,
         active: false,
@@ -407,6 +416,7 @@ export class FlightScene {
     const stats = applyCrewModifiers(computeShipStats(blueprint), blueprint.crew);
     const weapons = buildWeaponLoadout(blueprint);
     const powerFactor = computePowerFactor(stats.powerOutput, stats.powerDemand);
+    const maxShield = stats.shieldStrength;
     return {
       id,
       team,
@@ -423,6 +433,8 @@ export class FlightScene {
       hp: Math.max(stats.maxHp, 60),
       heat: 0,
       cooldown: 0,
+      shield: maxShield,
+      maxShield,
       radius: computeBlueprintRadius(blueprint),
       preferredRange,
       fireJitter,
@@ -570,6 +582,8 @@ export class FlightScene {
     projectile.team = ship.team;
     projectile.archetype = weapon.archetype;
     projectile.damage = damage;
+    projectile.damageType = weapon.damageType as DamageType;
+    projectile.armorPenetration = weapon.armorPenetration;
     projectile.ttl = weapon.archetype === 'missile' ? 3.8 : 2.2;
     projectile.turnRate = weapon.archetype === 'missile' ? 2.8 : 0;
     projectile.target = weapon.archetype === 'missile' ? this.findNearestEnemy(ship) : null;
@@ -628,7 +642,7 @@ export class FlightScene {
         if (!ship.alive || ship.team === projectile.team) continue;
         const distance = projectile.mesh.position.distanceTo(ship.position);
         if (distance <= ship.radius * 0.45) {
-          this.applyDamage(ship, projectile.damage);
+          this.applyDamage(ship, projectile.damage, projectile.damageType, projectile.armorPenetration);
           this.deactivateProjectile(projectile);
           break;
         }
@@ -671,7 +685,7 @@ export class FlightScene {
       if (target && drone.state.cooldown <= 0) {
         const victim = this.ships.find((ship) => ship.id === target.id && ship.alive);
         if (victim) {
-          this.applyDamage(victim, drone.state.damage * 0.35);
+          this.applyDamage(victim, drone.state.damage * 0.35, 'energy', 0);
           drone.state.cooldown = 1 / drone.state.fireRate;
           this.waveAnnouncement = `${owner.team === 'player' ? 'Support drones engaging' : 'Enemy drones attacking'}`;
         }
@@ -715,18 +729,36 @@ export class FlightScene {
     }
 
     if (bestTarget) {
-      this.applyDamage(bestTarget, damage * 0.85);
+      this.applyDamage(bestTarget, damage * 0.85, weapon.damageType as DamageType, weapon.armorPenetration);
       this.spawnBeamVisual(ship.position, bestTarget.position, ship.team);
       this.spawnImpactVisual(bestTarget.position, ship.team === 'player' ? '#5eead4' : '#fca5a5');
       this.waveAnnouncement = `${ship.team === 'player' ? 'Beam strike' : 'Enemy beam'} connected`;
     }
   }
 
-  private applyDamage(ship: RuntimeShip, damage: number): void {
-    ship.hp -= damage;
-    ship.heat = Math.min(ship.stats.heatCapacity * 1.25, ship.heat + damage * 0.08);
+  private applyDamage(ship: RuntimeShip, rawDamage: number, damageType: DamageType, armorPenetration: number): void {
+    const result: DamageResult = resolveDamage(
+      rawDamage,
+      damageType,
+      armorPenetration,
+      ship.shield,
+      ship.stats.armorRating,
+      ship.stats.kineticBypass,
+      ship.stats.energyVulnerability,
+    );
+
+    ship.shield -= result.shieldAbsorbed;
+    ship.hp -= result.hullDamage;
+    ship.heat = Math.min(ship.stats.heatCapacity * 1.25, ship.heat + rawDamage * 0.08);
     playHit();
-    this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185');
+
+    if (result.shieldAbsorbed > 0) {
+      this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#38bdf8' : '#f9a8d4');
+    }
+    if (result.hullDamage > 0 && result.shieldAbsorbed <= 0) {
+      this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185');
+    }
+
     if (ship.hp <= 0) {
       ship.alive = false;
       ship.group.visible = false;
@@ -846,6 +878,7 @@ export class FlightScene {
       ship.cooldown = Math.max(0, ship.cooldown - dt);
       const cooling = computeCoolingPerSecond(Math.max(2, ship.stats.cooling * 80), ship.powerFactor);
       ship.heat = Math.max(0, ship.heat - cooling * dt);
+      ship.shield = rechargeShield(ship.shield, ship.maxShield, ship.stats.shieldRecharge, dt);
     }
   }
 
@@ -966,11 +999,11 @@ export class FlightScene {
     this.camera.lookAt(lookTarget);
   }
 
-  private ensureHealthBar(ship: RuntimeShip): { bg: THREE.Mesh; fg: THREE.Mesh } {
+  private ensureHealthBar(ship: RuntimeShip): { bg: THREE.Mesh; fg: THREE.Mesh; shieldBg: THREE.Mesh; shieldFg: THREE.Mesh } {
     let bar = this.shipHealthBars.get(ship.id);
     if (bar) return bar;
     const barWidth = ship.radius * 1.6;
-    const barHeight = 0.28;
+    const barHeight = 0.22;
     const bg = new THREE.Mesh(
       new THREE.PlaneGeometry(barWidth, barHeight),
       new THREE.MeshBasicMaterial({ color: '#1e293b', transparent: true, opacity: 0.85 }),
@@ -981,8 +1014,18 @@ export class FlightScene {
       new THREE.MeshBasicMaterial({ color: ship.team === 'player' ? '#4ade80' : '#f87171' }),
     );
     fg.rotation.x = -Math.PI / 2;
-    this.healthBarGroup.add(bg, fg);
-    bar = { bg, fg };
+    const shieldBg = new THREE.Mesh(
+      new THREE.PlaneGeometry(barWidth, barHeight * 0.7),
+      new THREE.MeshBasicMaterial({ color: '#0c2d48', transparent: true, opacity: 0.7 }),
+    );
+    shieldBg.rotation.x = -Math.PI / 2;
+    const shieldFg = new THREE.Mesh(
+      new THREE.PlaneGeometry(barWidth, barHeight * 0.7),
+      new THREE.MeshBasicMaterial({ color: '#38bdf8', transparent: true, opacity: 0.85 }),
+    );
+    shieldFg.rotation.x = -Math.PI / 2;
+    this.healthBarGroup.add(bg, fg, shieldBg, shieldFg);
+    bar = { bg, fg, shieldBg, shieldFg };
     this.shipHealthBars.set(ship.id, bar);
     return bar;
   }
@@ -992,17 +1035,35 @@ export class FlightScene {
       if (!ship.alive) {
         const existing = this.shipHealthBars.get(ship.id);
         if (existing) {
-          this.healthBarGroup.remove(existing.bg, existing.fg);
+          this.healthBarGroup.remove(existing.bg, existing.fg, existing.shieldBg, existing.shieldFg);
           existing.bg.geometry.dispose();
           existing.fg.geometry.dispose();
+          existing.shieldBg.geometry.dispose();
+          existing.shieldFg.geometry.dispose();
           this.shipHealthBars.delete(ship.id);
         }
         continue;
       }
       const bar = this.ensureHealthBar(ship);
-      const y = ship.position.y + ship.radius + 0.8;
-      bar.bg.position.set(ship.position.x, y, ship.position.z);
       const barWidth = ship.radius * 1.6;
+      const y = ship.position.y + ship.radius + 0.8;
+
+      // Shield bar (above hull bar)
+      const shieldY = y + 0.28;
+      bar.shieldBg.position.set(ship.position.x, shieldY, ship.position.z);
+      const shieldRatio = ship.maxShield > 0 ? Math.max(0, ship.shield) / ship.maxShield : 0;
+      const shieldHalfFilled = (barWidth * shieldRatio) / 2;
+      bar.shieldFg.position.set(
+        ship.position.x - barWidth / 2 + shieldHalfFilled,
+        shieldY + 0.01,
+        ship.position.z,
+      );
+      bar.shieldFg.scale.x = shieldRatio;
+      bar.shieldFg.visible = ship.maxShield > 0;
+      bar.shieldBg.visible = ship.maxShield > 0;
+
+      // Hull bar
+      bar.bg.position.set(ship.position.x, y, ship.position.z);
       const hpRatio = Math.max(0, ship.hp) / Math.max(1, ship.stats.maxHp);
       const halfFilled = (barWidth * hpRatio) / 2;
       bar.fg.position.set(
@@ -1017,9 +1078,11 @@ export class FlightScene {
   private clearHealthBars(): void {
     for (const pair of Array.from(this.shipHealthBars.entries())) {
       const bar = pair[1];
-      this.healthBarGroup.remove(bar.bg, bar.fg);
+      this.healthBarGroup.remove(bar.bg, bar.fg, bar.shieldBg, bar.shieldFg);
       bar.bg.geometry.dispose();
       bar.fg.geometry.dispose();
+      bar.shieldBg.geometry.dispose();
+      bar.shieldFg.geometry.dispose();
     }
     this.shipHealthBars.clear();
   }
@@ -1037,6 +1100,7 @@ export class FlightScene {
     const protectedAlly = this.getProtectedAlly();
     const convoyProgress = this.getProtectedEscortProgress();
     const hpRatio = Math.max(0, this.player.hp) / Math.max(1, this.player.stats.maxHp);
+    const shieldRatio = this.player.maxShield > 0 ? Math.max(0, this.player.shield) / this.player.maxShield : 0;
     const heatRatio = this.player.heat / Math.max(1, this.player.stats.heatCapacity * 1.15);
     const overheatState = isOverheated(this.player.heat, this.player.stats.heatCapacity * 1.02);
     const crewSummary = Object.entries(this.player.blueprint.crew)
@@ -1053,6 +1117,7 @@ export class FlightScene {
         <div><span>Ship</span><strong>${this.player.blueprint.name}</strong></div>
         <div><span>Wave</span><strong>${this.currentWave} / ${this.waves.length}</strong></div>
         <div><span>Hull</span><strong>${Math.max(0, this.player.hp).toFixed(0)} / ${this.player.stats.maxHp.toFixed(0)}</strong></div>
+        ${this.player.maxShield > 0 ? `<div><span>Shield</span><strong>${Math.max(0, this.player.shield).toFixed(0)} / ${this.player.maxShield.toFixed(0)}</strong></div>` : ''}
         <div><span>Heat</span><strong>${this.player.heat.toFixed(0)} / ${this.player.stats.heatCapacity.toFixed(0)}</strong></div>
         <div><span>Power</span><strong>${this.player.powerFactor.toFixed(2)}x</strong></div>
         <div><span>Velocity</span><strong>${this.player.velocity.length().toFixed(1)}</strong></div>
@@ -1063,6 +1128,7 @@ export class FlightScene {
         ${this.encounterObjective.type === 'protect_ally' ? `<div><span>Convoy Progress</span><strong>${(convoyProgress * 100).toFixed(0)}%</strong></div>` : ''}
       </div>
       <p class="muted">Crew ${crewSummary}</p>
+      ${this.player.maxShield > 0 ? `<div class="meter shield"><span style="width:${shieldRatio * 100}%"></span></div>` : ''}
       <div class="meter"><span style="width:${hpRatio * 100}%"></span></div>
       <div class="meter heat"><span style="width:${Math.min(100, heatRatio * 100)}%"></span></div>
       ${this.encounterObjective.type === 'protect_ally' ? `<div class="meter"><span style="width:${Math.min(100, convoyProgress * 100)}%; background:linear-gradient(90deg,#67e8f9,#22d3ee)"></span></div>` : ''}

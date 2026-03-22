@@ -1,5 +1,7 @@
 export type ModuleCategory = 'bridge' | 'hull' | 'reactor' | 'engine' | 'weapon' | 'drone_bay' | 'shield' | 'armor';
 
+export type DamageType = 'energy' | 'kinetic' | 'explosive';
+
 export interface HexCoord {
   q: number;
   r: number;
@@ -61,4 +63,6 @@ export interface ShipStats {
   shieldStrength: number;
   shieldRecharge: number;
   armorRating: number;
+  kineticBypass: number;
+  energyVulnerability: number;
 }

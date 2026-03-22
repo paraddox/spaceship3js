@@ -181,6 +181,8 @@ export function computeShipStats(blueprint: ShipBlueprint): ShipStats {
     shieldStrength: 0,
     shieldRecharge: 0,
     armorRating: 0,
+    kineticBypass: 0,
+    energyVulnerability: 0,
   };
 
   for (const placed of blueprint.modules) {
@@ -213,10 +215,12 @@ export function computeShipStats(blueprint: ShipBlueprint): ShipStats {
     if (def.category === 'shield') {
       stats.shieldStrength += Number(def.stats.shieldStrength ?? 0);
       stats.shieldRecharge += Number(def.stats.shieldRecharge ?? 0);
+      stats.kineticBypass = Math.max(stats.kineticBypass, Number(def.stats.kineticBypass ?? 0));
     }
 
     if (def.category === 'armor') {
       stats.armorRating += Number(def.stats.armorRating ?? 0);
+      stats.energyVulnerability = Math.max(stats.energyVulnerability, Number(def.stats.energyVulnerability ?? 0));
     }
   }
 

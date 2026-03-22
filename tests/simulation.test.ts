@@ -6,6 +6,8 @@ import {
   getEffectiveWeaponCadence,
   isOverheated,
   advanceEncounterState,
+  resolveDamage,
+  rechargeShield,
   type EncounterState,
 } from '../src/game/simulation';
 
@@ -84,5 +86,82 @@ describe('encounter progression', () => {
       outcome: 'defeat',
       shouldSpawnWave: false,
     });
+  });
+});
+
+describe('damage resolution', () => {
+  it('energy damage is fully absorbed by shields', () => {
+    const result = resolveDamage(20, 'energy', 0, 80, 0, 0, 0);
+    expect(result.shieldAbsorbed).toBe(20);
+    expect(result.hullDamage).toBe(0);
+  });
+
+  it('energy damage that exceeds shield overflows to hull', () => {
+    const result = resolveDamage(100, 'energy', 0, 40, 0, 0, 0);
+    expect(result.shieldAbsorbed).toBe(40);
+    expect(result.hullDamage).toBe(60);
+  });
+
+  it('kinetic damage bypasses shields by kineticBypass fraction', () => {
+    const result = resolveDamage(20, 'kinetic', 0, 80, 0, 0.7, 0);
+    // 30% hits shield (20 * 0.3 = 6), 70% bypasses (14 raw to hull)
+    expect(result.shieldAbsorbed).toBeCloseTo(6, 10);
+    expect(result.hullDamage).toBeCloseTo(14, 10);
+  });
+
+  it('explosive damage is 50% absorbed by shields', () => {
+    const result = resolveDamage(40, 'explosive', 0, 80, 0, 0, 0);
+    expect(result.shieldAbsorbed).toBe(20);
+    expect(result.hullDamage).toBe(20);
+  });
+
+  it('armor reduces hull damage', () => {
+    // No shield, armor 12, effective reduction = 12/(12+50) ≈ 0.1935
+    const result = resolveDamage(100, 'kinetic', 0, 0, 12, 0, 0);
+    expect(result.shieldAbsorbed).toBe(0);
+    expect(result.hullDamage).toBeCloseTo(80.65, 0);
+  });
+
+  it('armor penetration reduces effective armor', () => {
+    const noPen = resolveDamage(100, 'kinetic', 0, 0, 12, 0, 0);
+    const withPen = resolveDamage(100, 'kinetic', 0.4, 0, 12, 0, 0);
+    expect(withPen.hullDamage).toBeGreaterThan(noPen.hullDamage);
+  });
+
+  it('energy vulnerability increases hull damage through armor', () => {
+    const normal = resolveDamage(100, 'kinetic', 0, 0, 12, 0, 0);
+    const vulnerable = resolveDamage(100, 'energy', 0, 0, 12, 0, 0.25);
+    // Energy is vulnerable through armor: armor reduction * (1 - 0.25) = less reduction
+    expect(vulnerable.hullDamage).toBeGreaterThan(normal.hullDamage);
+  });
+
+  it('zero damage returns zero results', () => {
+    const result = resolveDamage(0, 'energy', 0, 80, 12, 0, 0);
+    expect(result.shieldAbsorbed).toBe(0);
+    expect(result.hullDamage).toBe(0);
+  });
+
+  it('no shield and no armor passes full damage to hull', () => {
+    const result = resolveDamage(50, 'kinetic', 0, 0, 0, 0, 0);
+    expect(result.shieldAbsorbed).toBe(0);
+    expect(result.hullDamage).toBe(50);
+  });
+});
+
+describe('shield recharge', () => {
+  it('recharges shield over time', () => {
+    expect(rechargeShield(20, 80, 6, 2)).toBe(32);
+  });
+
+  it('clamps to max shield', () => {
+    expect(rechargeShield(75, 80, 6, 2)).toBe(80);
+  });
+
+  it('does nothing when max shield is zero', () => {
+    expect(rechargeShield(0, 0, 6, 2)).toBe(0);
+  });
+
+  it('does nothing when recharge rate is zero', () => {
+    expect(rechargeShield(40, 80, 0, 2)).toBe(40);
   });
 });
