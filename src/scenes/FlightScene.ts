@@ -70,6 +70,22 @@ import {
   type HazardState,
   type HazardSpawn,
 } from '../game/hazards';
+import {
+  createPickup,
+  rollPickupDrop,
+  updatePickup,
+  applyPickupAttraction,
+  tryCollectPickup,
+  applyRepair,
+  updateBuffs,
+  getDamageMultiplier,
+  getCadenceMultiplier,
+  getPickupColor,
+  getPickupIcon,
+  type PickupState,
+  type PickupKind,
+  type ActiveBuff,
+} from '../game/pickups';
 
 interface FlightSceneOptions {
   renderer: THREE.WebGLRenderer;
@@ -192,6 +208,14 @@ export class FlightScene {
   private readonly hazards: HazardState[] = [];
   private readonly hazardMeshes = new Map<string, THREE.Object3D>();
 
+  // Pickups
+  private readonly pickupGroup = new THREE.Group();
+  private readonly pickups: PickupState[] = [];
+  private readonly pickupMeshes = new Map<string, THREE.Object3D>();
+  private playerBuffs: ActiveBuff[] = [];
+  private pickupAnnouncement = '';
+  private pickupAnnouncementTimer = 0;
+
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
     this.keys.add(event.code);
@@ -233,7 +257,7 @@ export class FlightScene {
     const ambient = new THREE.AmbientLight(0xffffff, 1.2);
     const rim = new THREE.DirectionalLight(0xbfe1ff, 1.1);
     rim.position.set(8, 10, 6);
-    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup, this.healthBarGroup, this.particles.group, this.hazardGroup);
+    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup, this.healthBarGroup, this.particles.group, this.hazardGroup, this.pickupGroup);
 
     this.buildArena();
     this.buildProjectiles();
@@ -258,6 +282,8 @@ export class FlightScene {
     this.coolShips(dt);
     this.updateHazards(dt);
     this.updateShipHazards(dt);
+    this.updatePickups(dt);
+    this.updatePlayerBuffs(dt);
     this.updateAbilities(dt);
     this.updateHealthBars();
     this.updateEncounterState();
@@ -460,6 +486,8 @@ export class FlightScene {
     this.effects.length = 0;
     this.clearHealthBars();
     this.clearHazards();
+    this.clearPickups();
+    this.playerBuffs = [];
     for (const projectile of this.projectiles) {
       this.deactivateProjectile(projectile);
     }
@@ -807,16 +835,18 @@ export class FlightScene {
     if (!weapon) return;
     ship.weaponIndex = (ship.weaponIndex + 1) % ship.weapons.length;
 
+    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) : 1;
     const effectiveCadence = getEffectiveWeaponCadence(
       Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
       ship.powerFactor,
       ship.heat,
       ship.stats.heatCapacity,
-    );
+    ) * cadenceBuff;
     if (effectiveCadence <= 0.05) return;
 
     const normalizedDirection = direction.clone().normalize();
-    const damage = Math.max(4, weapon.damage * ship.powerFactor);
+    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) : 1;
+    const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier);
 
     if (weapon.archetype === 'beam') {
       this.fireBeam(ship, normalizedDirection, weapon, damage);
@@ -1109,6 +1139,14 @@ export class FlightScene {
       // Track kills in endless mode
       if (this.isEndlessMode && ship.team === 'enemy') {
         this.endlessTotalKills += 1;
+      }
+
+      // Drop pickup on enemy kill
+      if (ship.team === 'enemy') {
+        const pickupKind = rollPickupDrop(ship.radius, this.currentWave);
+        if (pickupKind) {
+          this.spawnPickup(pickupKind, ship.position.x, ship.position.z);
+        }
       }
     }
   }
