@@ -228,6 +228,19 @@ export function computeShipStats(blueprint: ShipBlueprint): ShipStats {
   return stats;
 }
 
+/**
+ * Recomputes ShipStats considering only the modules whose instanceIds
+ * are in the surviving set. Used when modules are destroyed in combat.
+ */
+export function computeStatsFromSurviving(
+  blueprint: ShipBlueprint,
+  survivingInstanceIds: Set<string>,
+): ShipStats {
+  const surviving = blueprint.modules.filter((m) => survivingInstanceIds.has(m.instanceId));
+  const partialBlueprint: ShipBlueprint = { ...blueprint, modules: surviving };
+  return computeShipStats(partialBlueprint);
+}
+
 export function serializeBlueprint(blueprint: ShipBlueprint): string {
   return JSON.stringify(blueprint, null, 2);
 }

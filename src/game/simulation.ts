@@ -1,4 +1,4 @@
-import type { DamageType } from '../core/types';
+import type { DamageType, HexCoord } from '../core/types';
 
 export interface DamageResult {
   shieldAbsorbed: number;
@@ -158,3 +158,104 @@ function clamp(value: number, min: number, max: number): number {
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
+
+export interface ModuleRuntimeState {
+  instanceId: string;
+  definitionId: string;
+  hex: HexCoord;
+  currentHp: number;
+  maxHp: number;
+  destroyed: boolean;
+  category: string;
+}
+
+/**
+ * Distributes hull damage across modules based on hit direction.
+ * Armor modules absorb damage for adjacent modules (directional protection).
+ * Returns list of module IDs that were newly destroyed this hit.
+ */
+export function damageModules(
+  modules: ModuleRuntimeState[],
+  hullDamage: number,
+  hitAngle: number, // angle of incoming attack in radians
+  armorAbsorptionFraction: number, // fraction of damage armor absorbs for neighbors (0.6)
+): string[] {
+  if (hullDamage <= 0 || modules.length === 0) return [];
+
+  const alive = modules.filter((m) => !m.destroyed);
+  if (alive.length === 0) return [];
+
+  // Score each module by alignment with hit direction.
+  // The hitAngle is the direction the attack came FROM (attacker→victim).
+  // A module on the struck side of the ship has an angle roughly opposite
+  // to the hit angle (hitAngle = PI means attacker at -Z, hitting +Z modules).
+  const hexToAngle = (hex: HexCoord): number => {
+    const worldX = 1.5 * hex.q;
+    const worldZ = (SQRT3 / 2) * hex.q + SQRT3 * hex.r;
+    return Math.atan2(worldX, worldZ);
+  };
+
+  const scored = alive.map((mod) => {
+    const moduleAngle = hexToAngle(mod.hex);
+    // A module is "in front of" the hit if its angle is opposite to hitAngle
+    const angleDiff = Math.abs(Math.atan2(
+      Math.sin(hitAngle - moduleAngle + Math.PI),
+      Math.cos(hitAngle - moduleAngle + Math.PI),
+    ));
+    return { mod, score: 1 - angleDiff / Math.PI }; // 1 = direct hit, 0 = opposite side
+  });
+
+  // Sort best (highest alignment) first
+  scored.sort((a, b) => b.score - a.score);
+
+  let remaining = hullDamage;
+  const newlyDestroyed: string[] = [];
+
+  // Try to damage the most-aligned module first, then spread
+  for (const { mod } of scored) {
+    if (remaining <= 0) break;
+
+    // Armor modules absorb damage for themselves and adjacent modules
+    if (mod.category === 'armor') {
+      const absorbed = remaining * armorAbsorptionFraction;
+      mod.currentHp -= absorbed;
+      remaining -= absorbed;
+      if (mod.currentHp <= 0 && !mod.destroyed) {
+        mod.destroyed = true;
+        mod.currentHp = 0;
+        newlyDestroyed.push(mod.instanceId);
+      }
+    }
+  }
+
+  // Apply remaining damage to the primary target
+  if (remaining > 0) {
+    const primary = scored[0].mod;
+    primary.currentHp -= remaining;
+    if (primary.currentHp <= 0 && !primary.destroyed) {
+      const overflow = -primary.currentHp;
+      primary.destroyed = true;
+      primary.currentHp = 0;
+      newlyDestroyed.push(primary.instanceId);
+
+      // Spread overflow to next-aligned modules
+      let spill = overflow;
+      for (let i = 1; i < scored.length && spill > 0; i += 1) {
+        const next = scored[i].mod;
+        next.currentHp -= spill;
+        if (next.currentHp <= 0 && !next.destroyed) {
+          spill = -next.currentHp;
+          next.destroyed = true;
+          next.currentHp = 0;
+          newlyDestroyed.push(next.instanceId);
+        } else {
+          spill = 0;
+        }
+      }
+    }
+  }
+
+  return newlyDestroyed;
+}
+
+const SQRT3 = Math.sqrt(3);

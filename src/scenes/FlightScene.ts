@@ -1,10 +1,10 @@
 import * as THREE from 'three';
-import { lerpAngle } from '../core/hex';
+import { lerpAngle, HEX_SIZE, transformFootprint } from '../core/hex';
 import type { ShipBlueprint, ShipStats, DamageType } from '../core/types';
 import { applyCrewModifiers, DEFAULT_CREW_ALLOCATION } from '../game/crew';
 import { ENCOUNTER_PRESETS, getEncounterPreset, type EncounterWave } from '../game/encounters';
 import { buildShipGroup, computeBlueprintRadius } from '../rendering/shipFactory';
-import { cloneBlueprint, computeShipStats, createExampleBlueprint } from '../state/shipBlueprint';
+import { cloneBlueprint, computeShipStats, computeStatsFromSurviving, createExampleBlueprint, getModuleDefinition } from '../state/shipBlueprint';
 import { buildWeaponLoadout, type WeaponProfile } from '../game/weapons';
 import { buildDroneProfiles } from '../game/drones';
 import {
@@ -27,6 +27,7 @@ import {
   advanceEncounterState,
   computeCoolingPerSecond,
   computePowerFactor,
+  damageModules,
   getEffectiveThrust,
   getEffectiveWeaponCadence,
   isOverheated,
@@ -34,6 +35,7 @@ import {
   resolveDamage,
   type DamageResult,
   type EncounterState,
+  type ModuleRuntimeState,
 } from '../game/simulation';
 
 interface FlightSceneOptions {
@@ -69,6 +71,8 @@ interface RuntimeShip {
   fireJitter: number;
   alive: boolean;
   powerFactor: number;
+  moduleStates: ModuleRuntimeState[];
+  moduleMeshes: Map<string, THREE.Mesh>;
 }
 
 interface Projectile {
@@ -417,6 +421,35 @@ export class FlightScene {
     const weapons = buildWeaponLoadout(blueprint);
     const powerFactor = computePowerFactor(stats.powerOutput, stats.powerDemand);
     const maxShield = stats.shieldStrength;
+
+    // Build per-module runtime state and mesh mapping
+    const moduleStates: ModuleRuntimeState[] = [];
+    const moduleMeshes = new Map<string, THREE.Mesh>();
+    let meshIndex = 0;
+    for (const placed of blueprint.modules) {
+      const def = getModuleDefinition(placed.definitionId);
+      const transformed = transformFootprint(def.footprint, placed.rotation);
+      // Store state for the first hex of each multi-hex module (the "anchor")
+      const anchorHex = { q: placed.position.q + transformed[0].q, r: placed.position.r + transformed[0].r };
+      moduleStates.push({
+        instanceId: placed.instanceId,
+        definitionId: placed.definitionId,
+        hex: anchorHex,
+        currentHp: def.maxHp,
+        maxHp: def.maxHp,
+        destroyed: false,
+        category: def.category,
+      });
+      // Map each hex's mesh to the instanceId
+      for (let h = 0; h < transformed.length; h += 1) {
+        const mesh = group.children[meshIndex * 2]; // mesh + outline alternating
+        if (mesh instanceof THREE.Mesh) {
+          moduleMeshes.set(`${placed.instanceId}:${h}`, mesh);
+        }
+        meshIndex += 1;
+      }
+    }
+
     return {
       id,
       team,
@@ -440,6 +473,8 @@ export class FlightScene {
       fireJitter,
       alive: true,
       powerFactor,
+      moduleStates,
+      moduleMeshes,
     };
   }
 
@@ -642,7 +677,11 @@ export class FlightScene {
         if (!ship.alive || ship.team === projectile.team) continue;
         const distance = projectile.mesh.position.distanceTo(ship.position);
         if (distance <= ship.radius * 0.45) {
-          this.applyDamage(ship, projectile.damage, projectile.damageType, projectile.armorPenetration);
+          const hitAngle = Math.atan2(
+            projectile.mesh.position.x - ship.position.x,
+            projectile.mesh.position.z - ship.position.z,
+          );
+          this.applyDamage(ship, projectile.damage, projectile.damageType, projectile.armorPenetration, hitAngle);
           this.deactivateProjectile(projectile);
           break;
         }
@@ -685,7 +724,11 @@ export class FlightScene {
       if (target && drone.state.cooldown <= 0) {
         const victim = this.ships.find((ship) => ship.id === target.id && ship.alive);
         if (victim) {
-          this.applyDamage(victim, drone.state.damage * 0.35, 'energy', 0);
+          const hitAngle = Math.atan2(
+            this.drones.find((d) => d.ownerId === owner.id)?.state.x ?? 0 - victim.position.x,
+            (this.drones.find((d) => d.ownerId === owner.id)?.state.z ?? 0) - victim.position.z,
+          );
+          this.applyDamage(victim, drone.state.damage * 0.35, 'energy', 0, hitAngle);
           drone.state.cooldown = 1 / drone.state.fireRate;
           this.waveAnnouncement = `${owner.team === 'player' ? 'Support drones engaging' : 'Enemy drones attacking'}`;
         }
@@ -729,14 +772,18 @@ export class FlightScene {
     }
 
     if (bestTarget) {
-      this.applyDamage(bestTarget, damage * 0.85, weapon.damageType as DamageType, weapon.armorPenetration);
+      const hitAngle = Math.atan2(
+        ship.position.x - bestTarget.position.x,
+        ship.position.z - bestTarget.position.z,
+      );
+      this.applyDamage(bestTarget, damage * 0.85, weapon.damageType as DamageType, weapon.armorPenetration, hitAngle);
       this.spawnBeamVisual(ship.position, bestTarget.position, ship.team);
       this.spawnImpactVisual(bestTarget.position, ship.team === 'player' ? '#5eead4' : '#fca5a5');
       this.waveAnnouncement = `${ship.team === 'player' ? 'Beam strike' : 'Enemy beam'} connected`;
     }
   }
 
-  private applyDamage(ship: RuntimeShip, rawDamage: number, damageType: DamageType, armorPenetration: number): void {
+  private applyDamage(ship: RuntimeShip, rawDamage: number, damageType: DamageType, armorPenetration: number, hitAngle: number): void {
     const result: DamageResult = resolveDamage(
       rawDamage,
       damageType,
@@ -748,15 +795,49 @@ export class FlightScene {
     );
 
     ship.shield -= result.shieldAbsorbed;
-    ship.hp -= result.hullDamage;
     ship.heat = Math.min(ship.stats.heatCapacity * 1.25, ship.heat + rawDamage * 0.08);
     playHit();
 
     if (result.shieldAbsorbed > 0) {
       this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#38bdf8' : '#f9a8d4');
     }
-    if (result.hullDamage > 0 && result.shieldAbsorbed <= 0) {
-      this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185');
+
+    // Route hull damage through module system
+    if (result.hullDamage > 0) {
+      if (result.shieldAbsorbed <= 0) {
+        this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185');
+      }
+
+      const destroyed = damageModules(ship.moduleStates, result.hullDamage, hitAngle, 0.6);
+
+      // Recalculate effective stats from surviving modules
+      const survivingIds = new Set(ship.moduleStates.filter((m) => !m.destroyed).map((m) => m.instanceId));
+      const newRawStats = computeStatsFromSurviving(ship.blueprint, survivingIds);
+      ship.stats = applyCrewModifiers(newRawStats, ship.blueprint.crew);
+      ship.powerFactor = computePowerFactor(ship.stats.powerOutput, ship.stats.powerDemand);
+      ship.maxShield = ship.stats.shieldStrength;
+      ship.shield = Math.min(ship.shield, ship.maxShield);
+
+      // Rebuild weapon loadout from surviving modules
+      const survivingBlueprint: ShipBlueprint = {
+        ...ship.blueprint,
+        modules: ship.blueprint.modules.filter((m) => survivingIds.has(m.instanceId)),
+      };
+      ship.weapons = buildWeaponLoadout(survivingBlueprint);
+      ship.weaponIndex = 0;
+
+      // Darken destroyed module meshes
+      for (const id of destroyed) {
+        this.darkenModuleMeshes(ship, id);
+        const mod = ship.moduleStates.find((m) => m.instanceId === id);
+        if (mod) {
+          const def = getModuleDefinition(mod.definitionId);
+          this.waveAnnouncement = `${def.displayName} destroyed!`;
+        }
+      }
+
+      // Recalculate HP from surviving module HP
+      ship.hp = ship.moduleStates.filter((m) => !m.destroyed).reduce((sum, m) => sum + m.currentHp, 0);
     }
 
     if (ship.hp <= 0) {
@@ -764,6 +845,21 @@ export class FlightScene {
       ship.group.visible = false;
       playExplosion();
       this.spawnExplosionVisual(ship.position, ship.team === 'player' ? '#fca5a5' : '#fb7185');
+    }
+  }
+
+  private darkenModuleMeshes(ship: RuntimeShip, instanceId: string): void {
+    const destroyedColor = new THREE.Color('#1e1e1e');
+    for (const key of Array.from(ship.moduleMeshes.keys())) {
+      if (key.startsWith(instanceId + ':')) {
+        const mesh = ship.moduleMeshes.get(key);
+        if (mesh && mesh.material instanceof THREE.MeshStandardMaterial) {
+          mesh.material.color.copy(destroyedColor);
+          mesh.material.emissive.set(0x000000);
+          mesh.material.opacity = 0.5;
+          mesh.material.transparent = true;
+        }
+      }
     }
   }
 

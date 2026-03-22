@@ -8,7 +8,9 @@ import {
   advanceEncounterState,
   resolveDamage,
   rechargeShield,
+  damageModules,
   type EncounterState,
+  type ModuleRuntimeState,
 } from '../src/game/simulation';
 
 describe('ship simulation helpers', () => {
@@ -163,5 +165,81 @@ describe('shield recharge', () => {
 
   it('does nothing when recharge rate is zero', () => {
     expect(rechargeShield(40, 80, 0, 2)).toBe(40);
+  });
+});
+
+function makeModule(id: string, hex: { q: number; r: number }, hp: number, category: string): ModuleRuntimeState {
+  return { instanceId: id, definitionId: `test:${id}`, hex, currentHp: hp, maxHp: hp, destroyed: false, category };
+}
+
+describe('module damage', () => {
+  it('damages the most-aligned module first', () => {
+    const modules: ModuleRuntimeState[] = [
+      makeModule('front', { q: 0, r: -1 }, 100, 'weapon'),
+      makeModule('back', { q: 0, r: 1 }, 100, 'engine'),
+    ];
+    // Hit from the front (angle 0 = +Z direction, hits hex at r=-1)
+    damageModules(modules, 30, 0, 0.6);
+    expect(modules[0].currentHp).toBeCloseTo(70, 5);
+    expect(modules[1].currentHp).toBe(100);
+  });
+
+  it('destroys a module when HP reaches zero', () => {
+    const modules: ModuleRuntimeState[] = [
+      makeModule('a', { q: 0, r: -1 }, 50, 'weapon'),
+    ];
+    const destroyed = damageModules(modules, 60, 0, 0.6);
+    expect(destroyed).toEqual(['a']);
+    expect(modules[0].destroyed).toBe(true);
+    expect(modules[0].currentHp).toBe(0);
+  });
+
+  it('returns empty array when no modules destroyed', () => {
+    const modules: ModuleRuntimeState[] = [
+      makeModule('a', { q: 0, r: 0 }, 100, 'weapon'),
+    ];
+    const destroyed = damageModules(modules, 30, 0, 0.6);
+    expect(destroyed).toEqual([]);
+    expect(modules[0].destroyed).toBe(false);
+  });
+
+  it('armor absorbs a fraction of damage', () => {
+    const armor = makeModule('armor', { q: 0, r: -1 }, 100, 'armor');
+    const weapon = makeModule('gun', { q: 1, r: 0 }, 100, 'weapon');
+    // Armor is in front — it absorbs 60% of the damage
+    damageModules([armor, weapon], 50, 0, 0.6);
+    // Armor absorbs 50*0.6 = 30, remaining 20 hits primary (armor again)
+    expect(armor.currentHp).toBeCloseTo(50, 5);
+    expect(weapon.currentHp).toBe(100);
+  });
+
+  it('overflow spreads to next aligned module', () => {
+    const modules: ModuleRuntimeState[] = [
+      makeModule('a', { q: 0, r: -1 }, 20, 'weapon'),
+      makeModule('b', { q: 1, r: 0 }, 100, 'hull'),
+    ];
+    const destroyed = damageModules(modules, 40, Math.PI / 4, 0.6);
+    // First module destroyed, 20 overflows to second
+    expect(destroyed).toEqual(['a']);
+    expect(modules[1].currentHp).toBeCloseTo(80, 5);
+  });
+
+  it('skips already-destroyed modules', () => {
+    const modules: ModuleRuntimeState[] = [
+      { ...makeModule('dead', { q: 0, r: 0 }, 100, 'weapon'), destroyed: true, currentHp: 0 },
+      makeModule('alive', { q: 0, r: 1 }, 100, 'engine'),
+    ];
+    const destroyed = damageModules(modules, 30, Math.PI, 0.6);
+    expect(destroyed).toEqual([]);
+    expect(modules[1].currentHp).toBeCloseTo(70, 5);
+  });
+
+  it('handles zero damage gracefully', () => {
+    const modules: ModuleRuntimeState[] = [
+      makeModule('a', { q: 0, r: 0 }, 100, 'weapon'),
+    ];
+    const destroyed = damageModules(modules, 0, 0, 0.6);
+    expect(destroyed).toEqual([]);
+    expect(modules[0].currentHp).toBe(100);
   });
 });
