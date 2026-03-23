@@ -15,6 +15,12 @@ export interface EncounterEnemy {
   fireJitter: number;
   /** Elite affixes rolled onto this enemy (endless mode only). */
   affixes?: RolledAffix[];
+  /** Optional persistent nemesis profile ID for recurring rivals. */
+  nemesisProfileId?: string;
+  /** Optional persistent nemesis level for HUD/scaling. */
+  nemesisLevel?: number;
+  /** Optional display label for nemesis ships. */
+  nemesisDisplayName?: string;
 }
 
 export interface EncounterWave {

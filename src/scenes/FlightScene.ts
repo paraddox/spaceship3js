@@ -36,6 +36,19 @@ import {
   endlessWaveScore,
 } from '../game/endless-generator';
 import {
+  createNemesisFromCandidate,
+  getNemesisBanner,
+  getNemesisReward,
+  getNemesisStatus,
+  injectNemesisIntoWave,
+  loadNemesisState,
+  persistNemesisState,
+  recordNemesisDefeat,
+  recordNemesisVictory,
+  shouldSpawnNemesis,
+  type NemesisState,
+} from '../game/nemesis';
+import {
   advanceEncounterState,
   computeCoolingPerSecond,
   computePowerFactor,
@@ -390,6 +403,10 @@ interface RuntimeShip {
   affixArmorBonus?: number;
   /** Whether this ship is a boss (endless mode boss waves). */
   isBoss?: boolean;
+  /** Whether this ship is a recurring nemesis. */
+  isNemesis?: boolean;
+  /** Persistent nemesis profile ID, if applicable. */
+  nemesisProfileId?: string;
   /** Whether this ship is a wingman (AI companion). */
   isWingman?: boolean;
 }
@@ -545,6 +562,12 @@ export class FlightScene {
   private salvageAnnouncementTimer = 0;
   private runSalvagedEntries: SalvagedBlueprint[] = [];
 
+  // Persistent rival / nemesis system
+  private nemesisState: NemesisState = loadNemesisState();
+  private nemesisShip: RuntimeShip | null = null;
+  private nemesisAnnouncement = '';
+  private nemesisAnnouncementTimer = 0;
+
   // Wingman system
   private wingmanState: WingmanState = createWingmanState();
   private wingmanShip: RuntimeShip | null = null;
@@ -696,6 +719,10 @@ export class FlightScene {
     if (this.mutagenAnnouncementTimer > 0) {
       this.mutagenAnnouncementTimer -= dt;
       if (this.mutagenAnnouncementTimer <= 0) this.mutagenAnnouncement = '';
+    }
+    if (this.nemesisAnnouncementTimer > 0) {
+      this.nemesisAnnouncementTimer -= dt;
+      if (this.nemesisAnnouncementTimer <= 0) this.nemesisAnnouncement = '';
     }
     if (this.crewOrderAnnouncementTimer > 0) {
       this.crewOrderAnnouncementTimer -= dt;
@@ -967,6 +994,9 @@ export class FlightScene {
     this.legacyFinalized = false;
     this.legacyNewMilestones = [];
     this.runSalvagedEntries = [];
+    this.nemesisShip = null;
+    this.nemesisAnnouncement = '';
+    this.nemesisAnnouncementTimer = 0;
     this.mutagenState = { ...this.mutagenState, pendingEssence: [] };
     this.mutagenStats = computeMutagenStats(this.mutagenState.mutations);
     this.mutagenAnnouncement = '';
@@ -1025,6 +1055,14 @@ export class FlightScene {
       this.waves.push(wave);
     }
 
+    if (this.isEndlessMode && shouldSpawnNemesis(this.nemesisState, waveNumber)) {
+      wave = injectNemesisIntoWave(this.nemesisState, wave, waveNumber);
+      if (this.nemesisState.active) {
+        this.nemesisAnnouncement = getNemesisBanner(this.nemesisState.active);
+        this.nemesisAnnouncementTimer = 3.5;
+      }
+    }
+
     this.waveAnnouncement = `${wave.name} deployed`;
 
     // Boss wave initialization (endless mode, every 5th wave)
@@ -1067,6 +1105,17 @@ export class FlightScene {
           mod.currentHp *= hpMult;
         }
         if (!this.bossShip) this.bossShip = runtimeShip;
+      }
+      if (enemy.nemesisProfileId) {
+        runtimeShip.isNemesis = true;
+        runtimeShip.nemesisProfileId = enemy.nemesisProfileId;
+        runtimeShip.hp *= 1 + (enemy.nemesisLevel ?? 1) * 0.16;
+        runtimeShip.stats.maxHp *= 1 + (enemy.nemesisLevel ?? 1) * 0.16;
+        for (const mod of runtimeShip.moduleStates) {
+          mod.maxHp *= 1 + (enemy.nemesisLevel ?? 1) * 0.16;
+          mod.currentHp *= 1 + (enemy.nemesisLevel ?? 1) * 0.16;
+        }
+        this.nemesisShip = runtimeShip;
       }
       this.ships.push(runtimeShip);
       this.spawnDronesForShip(runtimeShip);
@@ -1874,6 +1923,7 @@ export class FlightScene {
       }
       // Affix: death explosion — damages nearby ships
       this.handleAffixExplosion(ship);
+      this.handleNemesisKilled(ship);
       // Blueprint scavenging (elite/boss kill)
       this.handleSalvageOnKill(ship);
       if (this.isEndlessMode && ship.team === 'enemy' && this.activeContract?.kind === 'priority_target') {
@@ -1901,6 +1951,7 @@ export class FlightScene {
       }
       // Bigger screen shake for player death
       if (ship.team === 'player') {
+        this.resolveNemesisOnPlayerDeath();
         this.screenShake = createScreenShake(0.8, 0.5);
         // Mutagen: death explosion
         if (hasDeathExplosion(this.mutagenState.mutations)) {
@@ -2707,6 +2758,15 @@ export class FlightScene {
           ctx.stroke();
         }
 
+        if (ship.isNemesis) {
+          const pulse = 0.45 + 0.35 * Math.sin(this.elapsedEncounterSeconds * 6);
+          ctx.strokeStyle = `rgba(244, 114, 182, ${pulse})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(sx, sy, r + 7, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
         if (this.activeContract?.kind === 'priority_target' && this.activeContract.targetShipId === ship.id) {
           const pulse = 0.45 + 0.35 * Math.sin(this.elapsedEncounterSeconds * 7);
           ctx.strokeStyle = `rgba(251, 191, 36, ${pulse})`;
@@ -2995,6 +3055,7 @@ export class FlightScene {
         ${this.isEndlessMode ? `<div><span>Score</span><strong>${this.endlessScore.toLocaleString()}</strong></div>` : ''}
         ${this.isEndlessMode ? `<div><span>Credits</span><strong style=\"color:#fbbf24\">💰 ${this.endlessCredits}</strong></div>` : ''}
         ${this.isEndlessMode && this.wingmanState.config ? `<div><span>Wingman</span><strong style="color:${this.wingmanState.active ? '#60a5fa' : '#64748b'}">${this.wingmanState.active ? `${this.wingmanState.config.name} ${(this.wingmanState.hpFraction * 100).toFixed(0)}%` : `Respawn ${this.wingmanState.respawnTimer.toFixed(0)}s`}</strong></div>` : ''}
+        ${this.isEndlessMode && this.nemesisState.active ? `<div><span>Nemesis</span><strong style="color:#f472b6">${getNemesisStatus(this.nemesisState.active)}</strong></div>` : ''}
         ${this.isEndlessMode && this.purchasedUpgrades.length > 0 ? `<div><span>Upgrades</span><strong>${this.purchasedUpgrades.length}</strong></div>` : ''}
       </div>
       <div class="ability-bar">
@@ -3027,8 +3088,24 @@ export class FlightScene {
       ${this.bossWarning ? `<p style=\"font-size:1em;color:#f97316;font-weight:600;text-shadow:0 0 6px rgba(249,115,22,0.5)\">${this.bossWarning}</p>` : ''}
       ${this.salvageAnnouncement ? `<p style=\"font-size:1.05em;color:#c084fc;font-weight:600;text-shadow:0 0 8px rgba(192,132,252,0.5)\">${this.salvageAnnouncement}</p>` : ''}
       ${this.mutagenAnnouncement ? `<div style="color:#34d399;font-size:0.9em;text-align:center;text-shadow:0 0 8px #34d399">${this.mutagenAnnouncement}</div>` : ''}
+      ${this.nemesisAnnouncement ? `<div style="color:#f472b6;font-size:0.96em;text-align:center;text-shadow:0 0 8px rgba(244,114,182,0.55)">${this.nemesisAnnouncement}</div>` : ''}
       ${this.crewOrderAnnouncement ? `<div style="color:#93c5fd;font-size:0.92em;text-align:center;text-shadow:0 0 8px rgba(147,197,253,0.55)">${this.crewOrderAnnouncement}</div>` : ''}
       ${this.contractAnnouncement ? `<div style="color:#fbbf24;font-size:0.92em;text-align:center;text-shadow:0 0 8px rgba(251,191,36,0.55)">${this.contractAnnouncement}</div>` : ''}
+      ${this.nemesisShip && this.nemesisShip.alive && this.nemesisState.active ? (() => {
+        const nHp = Math.max(0, this.nemesisShip.hp);
+        const nMax = this.nemesisShip.stats.maxHp;
+        const nRatio = nMax > 0 ? nHp / nMax : 0;
+        return `<div style=\"margin:6px 0;padding:4px 8px;border:1px solid #f472b6;border-radius:4px;background:rgba(244,114,182,0.1)\">
+          <div style=\"display:flex;justify-content:space-between;align-items:center;margin-bottom:4px\">
+            <strong style=\"color:#f472b6;font-size:0.85em\">☠ ${this.nemesisState.active.callsign}</strong>
+            <span style=\"color:#f9a8d4;font-size:0.75em\">${getNemesisStatus(this.nemesisState.active)}</span>
+          </div>
+          <div style=\"height:8px;background:#1e1e1e;border-radius:4px;overflow:hidden\">
+            <div style=\"width:${nRatio * 100}%;height:100%;background:linear-gradient(90deg,#f472b6,#fb7185);transition:width 0.3s\"></div>
+          </div>
+          <span style=\"font-size:0.7em;color:#fbcfe8\">${nHp.toFixed(0)} / ${nMax.toFixed(0)}</span>
+        </div>`;
+      })() : ''}
       ${this.bossShip && this.bossShip.alive ? (() => {
         const bHp = Math.max(0, this.bossShip.hp);
         const bMax = this.bossShip.stats.maxHp;
@@ -3440,7 +3517,11 @@ export class FlightScene {
             for (const config of ParticleSystem.deathExplosion(ship.position)) {
               this.particles.emit(config);
             }
+            if (ship.team === 'player') {
+              this.resolveNemesisOnPlayerDeath();
+            }
             this.handleAffixExplosion(ship);
+            this.handleNemesisKilled(ship);
             // Blueprint scavenging (elite/boss kill — beam death path)
             this.handleSalvageOnKill(ship);
             if (this.isEndlessMode && ship.team === 'enemy' && this.activeContract?.kind === 'priority_target') {
@@ -4456,6 +4537,62 @@ export class FlightScene {
     if (isOrderActive(this.crewOrdersState, 'gunner_focus')) return '#fb923c';
     if (isOrderActive(this.crewOrdersState, 'tactician_link')) return '#a78bfa';
     return '#f8fafc';
+  }
+
+  private getStrongestLivingEnemy(): RuntimeShip | null {
+    const livingEnemies = this.ships.filter((candidate) => candidate.team === 'enemy' && candidate.alive);
+    if (livingEnemies.length === 0) return null;
+    let best = livingEnemies[0];
+    let bestScore = -Infinity;
+    for (const enemy of livingEnemies) {
+      const score = enemy.blueprint.modules.length * 10 + (this.shipAffixes.get(enemy.id)?.length ?? 0) * 18 + (enemy.isBoss ? 35 : 0);
+      if (score > bestScore) {
+        best = enemy;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  private resolveNemesisOnPlayerDeath(): void {
+    if (!this.isEndlessMode) return;
+
+    if (this.nemesisShip?.alive && this.nemesisState.active) {
+      this.nemesisState = recordNemesisVictory(this.nemesisState, this.currentWave);
+      persistNemesisState(this.nemesisState);
+      this.nemesisAnnouncement = `☠ ${this.nemesisState.active?.callsign ?? 'Nemesis'} escaped and grew stronger.`;
+      this.nemesisAnnouncementTimer = 4;
+      return;
+    }
+
+    if (!this.nemesisState.active && this.currentWave >= 4) {
+      const candidate = this.getStrongestLivingEnemy();
+      if (!candidate) return;
+      this.nemesisState = createNemesisFromCandidate(this.nemesisState, {
+        blueprint: candidate.blueprint,
+        waveNumber: this.currentWave,
+        isBoss: !!candidate.isBoss,
+      });
+      persistNemesisState(this.nemesisState);
+      this.nemesisAnnouncement = `☠ A new rival rises: ${this.nemesisState.active?.callsign ?? candidate.blueprint.name}`;
+      this.nemesisAnnouncementTimer = 4;
+    }
+  }
+
+  private handleNemesisKilled(ship: RuntimeShip): void {
+    if (!ship.isNemesis || !this.nemesisState.active) return;
+    const reward = getNemesisReward(this.nemesisState.active.level);
+    const fallenName = this.nemesisState.active.callsign;
+    this.endlessCredits += reward.credits;
+    this.endlessScore += reward.score;
+    this.onReward(this.encounterId, { credits: reward.credits, score: this.endlessScore, victory: true });
+    this.nemesisState = recordNemesisDefeat(this.nemesisState, this.currentWave);
+    persistNemesisState(this.nemesisState);
+    this.nemesisShip = null;
+    this.nemesisAnnouncement = this.nemesisState.active
+      ? `☠ Nemesis broken: ${fallenName}. It will return harder. +${reward.credits} credits`
+      : `☠ Nemesis ended: ${fallenName}. Rivalry closed. +${reward.credits} credits`;
+    this.nemesisAnnouncementTimer = 4;
   }
 
   // ── Legacy Codex Methods ──────────────────────────────────
