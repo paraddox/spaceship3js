@@ -610,6 +610,23 @@ export class FlightScene {
     this.updateBoss(dt);
     this.updateMusic(dt);
     this.updateWingman(dt);
+    // Tick crisis event timers
+    if (this.crisisEliteKillBuffTimer > 0) {
+      this.crisisEliteKillBuffTimer -= dt;
+      if (this.crisisEliteKillBuffTimer <= 0) this.crisisEliteKillBuffTimer = 0;
+    }
+    if (this.crisisDashGhostTimer > 0) {
+      this.crisisDashGhostTimer -= dt;
+      if (this.crisisDashGhostTimer <= 0) {
+        this.crisisDashGhostTimer = 0;
+        this.crisisDashGhostShip = null;
+      }
+    }
+    // Symbiote bond: combo HP regen
+    const hpRegen = getComboHpRegen(this.crisisState.activeEffects);
+    if (hpRegen > 0 && this.comboState.kills >= 3 && this.player.alive && this.player.hp < this.player.stats.maxHp) {
+      this.player.hp = Math.min(this.player.stats.maxHp, this.player.hp + this.player.stats.maxHp * hpRegen * dt);
+    }
     // Fade out elite announcement
     if (this.eliteAnnouncementTimer > 0) {
       this.eliteAnnouncementTimer -= dt;
@@ -1078,8 +1095,9 @@ export class FlightScene {
     const right = new THREE.Vector3(Math.cos(this.player.rotation), 0, -Math.sin(this.player.rotation));
     const forwardInput = Number(this.keys.has('KeyW')) - Number(this.keys.has('KeyS'));
     const strafeInput = Number(this.keys.has('KeyD')) - Number(this.keys.has('KeyA'));
+    const crisisThrustMult = getPlayerThrustMult(this.crisisState.activeEffects);
     const effectiveThrust = getEffectiveThrust(
-      Math.max(4, this.player.stats.thrust / 70),
+      Math.max(4, this.player.stats.thrust / 70 * crisisThrustMult),
       this.player.powerFactor,
       this.player.heat,
       this.player.stats.heatCapacity,
@@ -1116,7 +1134,7 @@ export class FlightScene {
       const shipRot = this.player.group.rotation.y;
       this.dashState = startDash(
         this.dashState, forward.x, forward.z, right.x, right.z,
-        shipRot, this.upgradeStats.dashCooldownReduction,
+        shipRot, this.upgradeStats.dashCooldownReduction + getDashCooldownMult(this.crisisState.activeEffects),
       );
       if (this.isEndlessMode) this.runStats.dashCount += 1;
       this.particles.emit(ParticleSystem.dashBurst(this.player.position));
@@ -1348,7 +1366,10 @@ export class FlightScene {
     projectile.ttl = weapon.archetype === 'missile' ? 3.8 : 2.2;
     projectile.turnRate = weapon.archetype === 'missile' ? 2.8 : 0;
     projectile.target = weapon.archetype === 'missile' ? this.findNearestEnemy(ship) : null;
-    projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(weapon.projectileSpeed + (ship.team === 'player' ? this.upgradeStats.projectileSpeedBonus : 0), 8)));
+    const crisisEnemyProjMult = getEnemyProjectileSpeedMult(this.crisisState.activeEffects);
+    projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(
+      (weapon.projectileSpeed + (ship.team === 'player' ? this.upgradeStats.projectileSpeedBonus : 0))
+      * (ship.team === 'enemy' ? crisisEnemyProjMult : 1), 8)));
     projectile.mesh.visible = true;
     projectile.mesh.position.copy(computeProjectileSpawnPosition(ship.position, spreadDirection, ship.radius));
     projectile.mesh.scale.setScalar(weapon.archetype === 'missile' ? 1.5 : weapon.archetype === 'laser' ? 0.9 : 1.1);
@@ -1532,7 +1553,7 @@ export class FlightScene {
   private applyDamage(ship: RuntimeShip, rawDamage: number, damageType: DamageType, armorPenetration: number, hitAngle: number): void {
     // Player is invulnerable during dash
     if (ship.team === 'player' && isInvulnerable(this.dashState)) return;
-    // Phase shift: player takes more damage
+    // Crisis: Phase Shift — player takes more damage
     if (ship.team === 'player' && getDamageTakenMult(this.crisisState.activeEffects) > 1) {
       rawDamage *= getDamageTakenMult(this.crisisState.activeEffects);
     }
@@ -1686,6 +1707,10 @@ export class FlightScene {
           this.endlessWaveEliteBonus += Math.floor(10 * eliteCreditsMultiplier(killedAffixes));
         }
         this.shipAffixes.delete(ship.id);
+        // Crisis: Neural Link — elite kill buff
+        if (killedIsElite && getEliteKillBuffDuration(this.crisisState.activeEffects) > 0) {
+          this.crisisEliteKillBuffTimer = getEliteKillBuffDuration(this.crisisState.activeEffects);
+        }
         // Mutator: Vampiric heal
         const heal = vampiricHeal(this.activeMutators, this.player.stats.maxHp);
         if (heal > 0 && this.player.alive) {
@@ -1709,7 +1734,8 @@ export class FlightScene {
         if (result.tierUp) this.runStats.highestComboTier = getComboTier(this.comboState.kills).label;
         // Charge overdrive from combo kills (higher tier = more charge)
         const comboTierMult = getComboTier(this.comboState.kills).multiplier;
-        this.overdriveState = addOverdriveCharge(this.overdriveState, OVERDRIVE_CHARGE_PER_KILL * comboTierMult);
+        const odChargeMult = getOverdriveChargeMult(this.crisisState.activeEffects);
+        this.overdriveState = addOverdriveCharge(this.overdriveState, OVERDRIVE_CHARGE_PER_KILL * comboTierMult * odChargeMult);
         if (result.tierUp) {
           this.particles.emit(ParticleSystem.comboBurst(this.player.position, getComboTier(this.comboState.kills).color));
           this.screenShake = createScreenShake(0.25, 0.2);
@@ -3107,6 +3133,10 @@ export class FlightScene {
                 this.endlessWaveEliteBonus += Math.floor(10 * eliteCreditsMultiplier(killedAffixes));
               }
               this.shipAffixes.delete(ship.id);
+              // Crisis: Neural Link — elite kill buff
+              if (killedIsElite && getEliteKillBuffDuration(this.crisisState.activeEffects) > 0) {
+                this.crisisEliteKillBuffTimer = getEliteKillBuffDuration(this.crisisState.activeEffects);
+              }
               // Mutator: Vampiric heal
               const heal2 = vampiricHeal(this.activeMutators, this.player.stats.maxHp);
               if (heal2 > 0 && this.player.alive) {
@@ -3141,7 +3171,7 @@ export class FlightScene {
               this.runStats.bestCombo = Math.max(this.runStats.bestCombo, this.comboState.kills);
               if (comboResult.tierUp) this.runStats.highestComboTier = getComboTier(this.comboState.kills).label;
               const comboMult2 = getComboTier(this.comboState.kills).multiplier;
-              this.overdriveState = addOverdriveCharge(this.overdriveState, OVERDRIVE_CHARGE_PER_KILL * comboMult2);
+              this.overdriveState = addOverdriveCharge(this.overdriveState, OVERDRIVE_CHARGE_PER_KILL * comboMult2 * getOverdriveChargeMult(this.crisisState.activeEffects));
               if (comboResult.tierUp) {
                 this.particles.emit(ParticleSystem.comboBurst(this.player.position, getComboTier(this.comboState.kills).color));
                 this.screenShake = createScreenShake(0.25, 0.2);
@@ -3329,7 +3359,7 @@ export class FlightScene {
 
   private updateCombo(dt: number): void {
     if (!this.isEndlessMode) return;
-    this.comboState = tickCombo(this.comboState, dt);
+    this.comboState = tickCombo(this.comboState, dt * getComboTimerDecayMult(this.crisisState.activeEffects));
   }
 
   private updateOverdrive(dt: number): void {
@@ -3674,7 +3704,8 @@ export class FlightScene {
   }
 
   private purchaseUpgrade(upgrade: UpgradeDef): void {
-    const cost = upgradeCost(upgrade, this.shopWaveCleared);
+    const crisisCostReduction = getUpgradeCostReduction(this.crisisState.activeEffects);
+    const cost = Math.floor(upgradeCost(upgrade, this.shopWaveCleared) * (1 - crisisCostReduction));
     if (this.endlessCredits < cost) return;
 
     this.endlessCredits -= cost;
@@ -3739,14 +3770,15 @@ export class FlightScene {
     this.player.stats = { ...baseStats };
 
     // Apply additive bonuses
-    this.player.stats.maxHp += s.maxHpBonus;
-    this.player.stats.shieldStrength += s.shieldBonus;
+    const upgradeStatMult = getUpgradeStatMult(this.crisisState.activeEffects);
+    this.player.stats.maxHp += Math.round(s.maxHpBonus * upgradeStatMult);
+    this.player.stats.shieldStrength += Math.round(s.shieldBonus * upgradeStatMult);
     this.player.stats.shieldRecharge *= (1 + s.shieldRechargeBonus);
-    this.player.stats.armorRating += s.armorRatingBonus;
+    this.player.stats.armorRating += Math.round(s.armorRatingBonus * upgradeStatMult);
     this.player.stats.kineticBypass += s.kineticBypassBonus;
     this.player.stats.energyVulnerability = Math.max(0, this.player.stats.energyVulnerability - s.energyVulnerabilityReduction);
     this.player.stats.powerOutput *= (1 + s.powerOutputBonus);
-    this.player.stats.heatCapacity += s.heatCapacityBonus;
+    this.player.stats.heatCapacity += Math.round(s.heatCapacityBonus * upgradeStatMult);
     this.player.stats.cooling *= (1 + s.coolingBonus);
     this.player.stats.thrust *= (1 + s.thrustBonus);
     this.player.stats.droneCapacity += s.droneCapacityBonus;
@@ -3760,10 +3792,11 @@ export class FlightScene {
     this.player.hp = Math.min(this.player.hp + s.maxHpBonus, this.player.stats.maxHp);
 
     // Apply permanent mutagen stats
-    this.player.stats.maxHp = Math.round(this.player.stats.maxHp * this.mutagenStats.maxHpMultiplier);
+    const mutagenStatMult = getMutagenStatMult(this.crisisState.activeEffects);
+    this.player.stats.maxHp = Math.round(this.player.stats.maxHp * this.mutagenStats.maxHpMultiplier * mutagenStatMult);
     this.player.stats.shieldStrength = Math.round(this.player.stats.shieldStrength * this.mutagenStats.shieldMultiplier);
     this.player.stats.thrust *= this.mutagenStats.thrustMultiplier;
-    this.player.stats.armorRating += this.mutagenStats.armorBonus;
+    this.player.stats.armorRating += Math.round(this.mutagenStats.armorBonus * mutagenStatMult);
     this.player.maxShield = this.player.stats.shieldStrength;
     this.player.shield = Math.min(this.player.shield, this.player.maxShield);
     this.player.hp = Math.min(this.player.hp, this.player.stats.maxHp);
