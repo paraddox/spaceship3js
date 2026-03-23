@@ -29,6 +29,7 @@ export interface RunStats {
   overdriveActivations: number;
   dashCount: number;
   abilityActivations: number;
+  blueprintsSalvaged: number;
 }
 
 export interface RunGrade {
@@ -65,6 +66,7 @@ export const DEFAULT_RUN_STATS: RunStats = {
   overdriveActivations: 0,
   dashCount: 0,
   abilityActivations: 0,
+  blueprintsSalvaged: 0,
 };
 
 /**

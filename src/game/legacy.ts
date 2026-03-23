@@ -71,6 +71,7 @@ export interface RunSnapshot {
   overdriveActivations: number;
   dashCount: number;
   abilityActivations: number;
+  blueprintsSalvaged: number;
   grade: string;
 }
 
@@ -92,6 +93,8 @@ export interface LegacyState {
   unlockedBonuses: StartingBonusId[];
   /** Currently active bonuses (user-selected from unlocked). Max 3. */
   activeBonuses: StartingBonusId[];
+  /** Total blueprints salvaged across all runs. */
+  totalSalvaged: number;
 }
 
 export const MAX_ACTIVE_BONUSES = 3;
@@ -338,6 +341,38 @@ export const MILESTONES: MilestoneDef[] = [
     hint: 'Finish a run with 2+ traits',
     check: (s) => s.mutatorsChosen.length >= 2,
   },
+
+  // ── Salvage Milestones ──
+  {
+    id: 'first_salvage',
+    displayName: 'Scavenger',
+    icon: '🔧',
+    description: 'Salvage your first enemy blueprint',
+    category: 'mastery',
+    unlocks: 'quick_start',
+    hint: 'Kill an elite enemy and salvage its blueprint',
+    check: (s) => s.blueprintsSalvaged >= 1,
+  },
+  {
+    id: 'salvage_boss',
+    displayName: 'Trophy Hunter',
+    icon: '🏆',
+    description: 'Salvage a boss blueprint',
+    category: 'combat',
+    unlocks: 'tough_hull',
+    hint: 'Defeat a boss and salvage its design',
+    check: (s) => s.blueprintsSalvaged >= 1 && s.bossKills >= 1,
+  },
+  {
+    id: 'salvage_5',
+    displayName: 'Collector',
+    icon: '📦',
+    description: 'Salvage 5 blueprints across all runs',
+    category: 'mastery',
+    unlocks: 'shield_seed',
+    hint: 'Salvage 5 unique enemy blueprints',
+    check: (_s, legacy) => legacy.totalSalvaged >= 5,
+  },
 ];
 
 // ── Default State ────────────────────────────────────────────
@@ -353,6 +388,7 @@ export const DEFAULT_LEGACY_STATE: LegacyState = {
   completedMilestones: [],
   unlockedBonuses: [],
   activeBonuses: [],
+  totalSalvaged: 0,
 };
 
 // ── Legacy XP Calculation ────────────────────────────────────
@@ -448,6 +484,7 @@ export function finalizeRun(
   updated.bestScore = Math.max(updated.bestScore, snapshot.score);
   updated.totalKills += snapshot.totalKills;
   updated.totalCreditsEarned += snapshot.creditsEarned;
+  updated.totalSalvaged += snapshot.blueprintsSalvaged;
 
   // Track best grade (S > A > B > C > D)
   const gradeOrder = ['D', 'C', 'B', 'A', 'S'];
@@ -594,6 +631,7 @@ export function loadLegacyState(): LegacyState {
       completedMilestones: Array.isArray(data.completedMilestones) ? data.completedMilestones : [],
       unlockedBonuses: Array.isArray(data.unlockedBonuses) ? data.unlockedBonuses : [],
       activeBonuses: Array.isArray(data.activeBonuses) ? data.activeBonuses : [],
+      totalSalvaged: Number(data.totalSalvaged ?? 0),
     };
   } catch {
     return { ...DEFAULT_LEGACY_STATE };

@@ -206,6 +206,17 @@ import {
   type BossTelegraph,
 } from '../game/boss-encounters';
 import {
+  type SalvageResult,
+  type SalvagedBlueprint,
+  RARITY_CONFIG,
+  DEFAULT_SALVAGE_COLLECTION,
+  rollSalvage,
+  addSalvageEntry,
+  recordSalvageAttempt,
+  loadSalvageCollection,
+  persistSalvageCollection,
+} from '../game/salvage';
+import {
   playBossPhaseTransition,
   playBossTelegraph,
   playBossAttack,
@@ -407,6 +418,13 @@ export class FlightScene {
   private legacyFinalized = false;
   private legacyNewMilestones: typeof MILESTONES = [];
 
+  // Blueprint Scavenging (salvage system)
+  private salvageCollection = { ...DEFAULT_SALVAGE_COLLECTION };
+  private salvageRunCount = 0;
+  private salvageAnnouncement = '';
+  private salvageAnnouncementTimer = 0;
+  private runSalvagedEntries: SalvagedBlueprint[] = [];
+
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
     this.keys.add(event.code);
@@ -448,6 +466,8 @@ export class FlightScene {
     // Load legacy state for endless mode
     if (this.isEndlessMode) {
       this.legacyState = loadLegacyState();
+      this.salvageCollection = loadSalvageCollection();
+      this.salvageRunCount = this.salvageCollection.totalAttempts;
     }
 
     const ambient = new THREE.AmbientLight(0xffffff, 1.2);
@@ -497,6 +517,11 @@ export class FlightScene {
     if (this.eliteAnnouncementTimer > 0) {
       this.eliteAnnouncementTimer -= dt;
       if (this.eliteAnnouncementTimer <= 0) this.eliteAnnouncement = '';
+    }
+    // Fade out salvage announcement
+    if (this.salvageAnnouncementTimer > 0) {
+      this.salvageAnnouncementTimer -= dt;
+      if (this.salvageAnnouncementTimer <= 0) this.salvageAnnouncement = '';
     }
     this.updateAbilities(dt);
     this.updateHealthBars();
@@ -749,6 +774,7 @@ export class FlightScene {
     this.shopWaveCleared = 0;
     this.legacyFinalized = false;
     this.legacyNewMilestones = [];
+    this.runSalvagedEntries = [];
     this.waveAnnouncement = `${this.currentWave > 0 ? `Wave ${this.currentWave}` : 'Wave 1'} incoming...`;
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
@@ -1462,6 +1488,8 @@ export class FlightScene {
       }
       // Affix: death explosion — damages nearby ships
       this.handleAffixExplosion(ship);
+      // Blueprint scavenging (elite/boss kill)
+      this.handleSalvageOnKill(ship);
       // Bigger screen shake for player death
       if (ship.team === 'player') {
         this.screenShake = createScreenShake(0.8, 0.5);
@@ -2358,6 +2386,7 @@ export class FlightScene {
       ${this.eliteAnnouncement ? `<p style=\"font-size:1em;color:#fbbf24;font-weight:600;text-shadow:0 0 6px rgba(251,191,36,0.5)\">${this.eliteAnnouncement}</p>` : ''}
       ${this.bossAnnouncement ? `<p style=\"font-size:1.2em;color:#ef4444;font-weight:700;text-shadow:0 0 10px rgba(239,68,68,0.6)\">${this.bossAnnouncement}</p>` : ''}
       ${this.bossWarning ? `<p style=\"font-size:1em;color:#f97316;font-weight:600;text-shadow:0 0 6px rgba(249,115,22,0.5)\">${this.bossWarning}</p>` : ''}
+      ${this.salvageAnnouncement ? `<p style=\"font-size:1.05em;color:#c084fc;font-weight:600;text-shadow:0 0 8px rgba(192,132,252,0.5)\">${this.salvageAnnouncement}</p>` : ''}
       ${this.bossShip && this.bossShip.alive ? (() => {
         const bHp = Math.max(0, this.bossShip.hp);
         const bMax = this.bossShip.stats.maxHp;
@@ -2449,6 +2478,7 @@ export class FlightScene {
           ${highlights.length > 0 ? `<div style="text-align:center;margin-bottom:6px">${highlights.map((h) => `<span style="display:inline-block;background:#334155;color:#e2e8f0;padding:2px 8px;border-radius:4px;font-size:0.8em;margin:2px">⭐ ${h}</span>`).join('')}</div>` : ''}
           <div style="font-size:0.8em;margin-bottom:4px"><span style="color:#94a3b8">Traits:</span> ${mutatorTags}</div>
           <div style="font-size:0.8em;color:#fb7185;margin-bottom:6px">${cause}</div>
+          ${this.runSalvagedEntries.length > 0 ? `<div style="background:#1e1b4b;border-radius:6px;padding:8px;margin-bottom:6px"><div style="font-size:0.8em;color:#c084fc;font-weight:600;margin-bottom:4px">🔧 Blueprints Salvaged (${this.runSalvagedEntries.length})</div>${this.runSalvagedEntries.map((e) => { const rc = RARITY_CONFIG[e.rarity]; return `<div style="display:flex;align-items:center;gap:6px;margin-top:3px"><span style="color:${rc.color};font-weight:600;font-size:0.8em">${rc.label}</span><span style="color:#e2e8f0;font-size:0.8em">${e.name}</span></div>`; }).join('')}</div>` : ''}
           <div style="background:#0f172a;border-left:3px solid #38bdf8;padding:6px 8px;border-radius:0 4px 4px 0;font-size:0.8em;color:#94a3b8;margin-bottom:6px">
             <strong style="color:#38bdf8">Next run:</strong> ${tip}
           </div>
@@ -2760,6 +2790,8 @@ export class FlightScene {
               this.particles.emit(config);
             }
             this.handleAffixExplosion(ship);
+            // Blueprint scavenging (elite/boss kill — beam death path)
+            this.handleSalvageOnKill(ship);
             if (this.isEndlessMode && ship.team === 'enemy') {
               this.endlessTotalKills += 1;
               const killedAffixes = this.shipAffixes.get(ship.id);
@@ -3564,6 +3596,54 @@ export class FlightScene {
     persistLegacyState(updated);
   }
 
+  // ── Blueprint Scavenging Methods ────────────────────────────
+
+  /**
+   * Attempt to salvage the blueprint of a killed enemy ship.
+   * Call from all 3 death paths (projectile, beam, hazard).
+   * Only elites/bosses can be salvaged in endless mode.
+   */
+  private handleSalvageOnKill(ship: RuntimeShip): void {
+    if (!this.isEndlessMode || ship.team !== 'enemy') return;
+
+    const affixes = this.shipAffixes.get(ship.id);
+    const isElite = affixes != null && affixes.length >= 2;
+    if (!isElite && !ship.isBoss) return;
+
+    const affixNames = affixes?.map((a) => a.def.displayName) ?? [];
+    const comboTier = this.comboState.kills;
+
+    const result = rollSalvage(
+      {
+        waveNumber: this.currentWave,
+        isElite,
+        isBoss: !!ship.isBoss,
+        comboTier,
+        hasCreditBooster: this.legacyState.activeBonuses.includes('credit_booster'),
+      },
+      ship.blueprint,
+      affixNames,
+      this.salvageCollection,
+      this.salvageRunCount,
+      Math.random(),
+    );
+
+    this.salvageCollection = recordSalvageAttempt(this.salvageCollection);
+
+    if (result) {
+      this.salvageCollection = addSalvageEntry(this.salvageCollection, result.entry);
+      this.runSalvagedEntries.push(result.entry);
+      persistSalvageCollection(this.salvageCollection);
+      this.runStats.blueprintsSalvaged += 1;
+
+      const rc = RARITY_CONFIG[result.entry.rarity];
+      const newTag = result.isNew ? ' ✨ NEW' : '';
+      this.salvageAnnouncement = `🔧 Blueprint Salvaged: ${rc.label}${newTag}`;
+      this.salvageAnnouncementTimer = 4;
+      this.screenShake = createScreenShake(0.3, 0.2);
+    }
+  }
+
   private buildLegacySnapshot(grade: { letter: string }): RunSnapshot {
     return {
       waveReached: this.endlessBestWave || (this.currentWave - 1),
@@ -3585,6 +3665,7 @@ export class FlightScene {
       overdriveActivations: this.runStats.overdriveActivations,
       dashCount: this.runStats.dashCount,
       abilityActivations: this.runStats.abilityActivations,
+      blueprintsSalvaged: this.runStats.blueprintsSalvaged,
       grade: grade.letter,
     };
   }
