@@ -263,6 +263,39 @@ import {
   getHpRegenRate,
   MAX_ESSENCE_SLOTS,
 } from '../game/mutagen';
+import {
+  type CrisisEffectId,
+  type CrisisState,
+  type CrisisEventDef,
+  createCrisisState,
+  shouldTriggerCrisis,
+  prepareCrisisEvent,
+  resolveCrisisChoice,
+  markCrisisResolved,
+  isCrisisPending,
+  getActiveEffectLabels,
+  getOverchargeHpCost,
+  getOverchargeDamageMult,
+  getOverchargeDurationBonus,
+  getOverdriveChargeMult,
+  getAbilityCooldownReduction,
+  getAbilityShieldBubble,
+  getDashCooldownMult,
+  getDashGhostDuration,
+  getEnemyProjectileSpeedMult,
+  getPlayerThrustMult,
+  getDamageTakenMult,
+  getEliteKillBuffDuration,
+  getEliteKillDamageBuff,
+  getEliteKillFireRateBuff,
+  getExtraEnemyAffixes,
+  getComboHpRegen,
+  getComboTimerDecayMult,
+  getMutagenStatMult,
+  getUpgradeCostReduction,
+  getUpgradeStatMult,
+  shouldClearMutations,
+} from '../game/critical-events';
 
 const REPAIR_HP_FRACTION = 0.75;
 
@@ -468,6 +501,15 @@ export class FlightScene {
   private mutagenStats = computeMutagenStats([]);
   private mutagenAnnouncement = '';
   private mutagenAnnouncementTimer = 0;
+
+  // Critical events (Crisis Protocol)
+  private crisisState: CrisisState = createCrisisState();
+  /** Timer for neural link elite kill buff (seconds remaining) */
+  private crisisEliteKillBuffTimer = 0;
+  /** Timer for dash ghost (seconds remaining) */
+  private crisisDashGhostTimer = 0;
+  /** Dash ghost ship reference (fires player weapons) */
+  private crisisDashGhostShip: RuntimeShip | null = null;
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
@@ -838,6 +880,11 @@ export class FlightScene {
     this.mutagenStats = computeMutagenStats(this.mutagenState.mutations);
     this.mutagenAnnouncement = '';
     this.mutagenAnnouncementTimer = 0;
+    // Reset crisis state for new run
+    this.crisisState = createCrisisState();
+    this.crisisEliteKillBuffTimer = 0;
+    this.crisisDashGhostTimer = 0;
+    this.crisisDashGhostShip = null;
     // Reset wingman for new run (respawn if was deployed)
     if (this.wingmanState.config) {
       this.wingmanState = { ...createWingmanState(), config: this.wingmanState.config };
@@ -1260,7 +1307,8 @@ export class FlightScene {
 
     // Mutator: Last Stand fire rate boost
     const lastStand = ship.team === 'player' ? lastStandBonuses(this.activeMutators, this.player.hp / Math.max(1, this.player.stats.maxHp)) : { damageMult: 1, fireRateMult: 1 };
-    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier * getOverdriveFireRateMult(this.overdriveState) * lastStand.fireRateMult * this.mutagenStats.fireRateMultiplier : (ship.affixFireRateMult ?? 1);
+    const crisisFireRate = this.crisisEliteKillBuffTimer > 0 ? getEliteKillFireRateBuff(this.crisisState.activeEffects) : 1;
+    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier * getOverdriveFireRateMult(this.overdriveState) * lastStand.fireRateMult * this.mutagenStats.fireRateMultiplier * crisisFireRate : (ship.affixFireRateMult ?? 1);
     const effectiveCadence = getEffectiveWeaponCadence(
       Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
       ship.powerFactor,
@@ -1271,7 +1319,8 @@ export class FlightScene {
 
     const normalizedDirection = direction.clone().normalize();
     const momentumMult = ship.team === 'player' ? momentumDamageMult(this.activeMutators, ship.velocity.length()) : 1;
-    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier * getOverdriveDamageMult(this.overdriveState) * lastStand.damageMult * momentumMult * this.mutagenStats.damageMultiplier : (ship.affixDamageMult ?? 1);
+    const crisisDamage = this.crisisEliteKillBuffTimer > 0 ? getEliteKillDamageBuff(this.crisisState.activeEffects) : 1;
+    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier * getOverdriveDamageMult(this.overdriveState) * lastStand.damageMult * momentumMult * this.mutagenStats.damageMultiplier * crisisDamage : (ship.affixDamageMult ?? 1);
     const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier);
 
     if (weapon.archetype === 'beam') {
@@ -1483,6 +1532,10 @@ export class FlightScene {
   private applyDamage(ship: RuntimeShip, rawDamage: number, damageType: DamageType, armorPenetration: number, hitAngle: number): void {
     // Player is invulnerable during dash
     if (ship.team === 'player' && isInvulnerable(this.dashState)) return;
+    // Phase shift: player takes more damage
+    if (ship.team === 'player' && getDamageTakenMult(this.crisisState.activeEffects) > 1) {
+      rawDamage *= getDamageTakenMult(this.crisisState.activeEffects);
+    }
     // Boss is invulnerable during phase transitions
     if (ship.isBoss && this.bossAI && !isBossVulnerable(this.bossAI)) return;
     // Track player damage time for music intensity
@@ -1907,6 +1960,17 @@ export class FlightScene {
         this.onReward(this.encounterId, { credits: waveCredits, score: this.endlessScore, victory: true });
         // Reset combo score bank after applying (combo streak itself persists across waves)
         this.comboState = { ...this.comboState, totalComboScore: 0 };
+
+        // Check for crisis event before opening shop
+        if (shouldTriggerCrisis(this.currentWave, this.crisisState)) {
+          this.crisisState = prepareCrisisEvent(this.currentWave, this.crisisState, Math.random());
+          if (isCrisisPending(this.crisisState)) {
+            this.shopOpen = true;
+            this.waveAnnouncement = `⚠ Crisis Event — Wave ${this.currentWave}`;
+            return;
+          }
+        }
+
         // Open upgrade shop instead of immediately spawning next wave
         this.openUpgradeShop(this.currentWave);
       }
@@ -2395,6 +2459,56 @@ export class FlightScene {
 
     // When shop is open, replace HUD with upgrade selection UI
     if (this.shopOpen && hud) {
+      // Crisis event takes priority over normal shop
+      if (isCrisisPending(this.crisisState) && this.crisisState.pendingEvent) {
+        const event = this.crisisState.pendingEvent;
+        const choiceCards = event.choices.map((c) => {
+          return `<div class="crisis-choice-card" style="border-color:${c.color};background:rgba(${parseInt(c.color.slice(1,3),16)},${parseInt(c.color.slice(3,5),16)},${parseInt(c.color.slice(5,7),16)},0.08)">
+            <div style="font-size:1.4em">${c.icon}</div>
+            <strong style="color:${c.color}">${c.name}</strong>
+            <p style="margin:6px 0;color:#e2e8f0;font-size:0.9em">${c.description}</p>
+            <small style="color:#94a3b8;font-style:italic">${c.flavor}</small>
+            <button class="crisis-choice-btn" data-crisis="${c.id}" style="background:${c.color};border-color:${c.color};margin-top:8px;font-size:0.85em">
+              Choose
+            </button>
+          </div>`;
+        }).join('');
+
+        hud.innerHTML = `
+          <div style="text-align:center;margin-bottom:12px">
+            <div style="font-size:1.8em">${event.icon}</div>
+            <strong style="font-size:1.2em;color:#fbbf24;text-shadow:0 0 12px rgba(251,191,36,0.5)">⚠ ${event.name}</strong>
+            <p style="color:#94a3b8;margin:6px 0;font-size:0.9em">${event.description}</p>
+            <p style="color:#64748b;font-size:0.8em">Crisis effects persist for the rest of this run. Choose wisely.</p>
+          </div>
+          <div class="crisis-choice-grid">${choiceCards}</div>
+          ${this.crisisState.activeEffects.length > 0 ? `<div style="margin-top:10px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap">${getActiveEffectLabels(this.crisisState.activeEffects).map((e) => `<span style="background:rgba(${parseInt(e.color.slice(1,3),16)},${parseInt(e.color.slice(3,5),16)},${parseInt(e.color.slice(5,7),16)},0.2);border:1px solid ${e.color};border-radius:4px;padding:2px 6px;font-size:0.75em;color:${e.color}">${e.icon} ${e.name}</span>`).join('')}</div>` : ''}
+        `;
+
+        // Bind crisis choice buttons
+        hud.querySelectorAll('[data-crisis]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const effectId = (btn as HTMLElement).dataset.crisis as CrisisEffectId;
+            if (!effectId) return;
+            this.crisisState = resolveCrisisChoice(this.crisisState, effectId);
+            this.crisisState = markCrisisResolved(this.crisisState, this.currentWave);
+
+            // Handle adaptive mutation: clear existing mutations
+            if (shouldClearMutations(this.crisisState.activeEffects)) {
+              this.mutagenState = { ...this.mutagenState, mutations: [] };
+              this.mutagenStats = computeMutagenStats([]);
+              persistMutagenState(this.mutagenState);
+            }
+
+            // Close crisis, then open normal shop
+            this.closeUpgradeShop();
+          });
+        });
+
+        this.renderer.render(this.scene, this.camera);
+        return;
+      }
+
       const restRepair = this.shopWaveCleared > 0 && this.shopWaveCleared % 5 === 0;
       const upgradeCards = this.shopOptions.map((u, i) => {
         const cost = upgradeCost(u, this.shopWaveCleared);
