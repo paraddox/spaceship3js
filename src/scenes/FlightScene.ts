@@ -246,6 +246,23 @@ import {
   destroyMusicAudio,
   type MusicDirectorState,
 } from '../game/music-director';
+import {
+  type MutagenState,
+  type MutagenId,
+  loadMutagenState,
+  persistMutagenState,
+  createMutagenState,
+  collectEssenceFromKill,
+  absorbEssence,
+  computeMutagenStats,
+  getMutationDef,
+  getMutationStacks,
+  hasMutations,
+  hasDeathExplosion,
+  getDeathExplosionDamage,
+  getHpRegenRate,
+  MAX_ESSENCE_SLOTS,
+} from '../game/mutagen';
 
 const REPAIR_HP_FRACTION = 0.75;
 
@@ -446,6 +463,12 @@ export class FlightScene {
   private wingmanShip: RuntimeShip | null = null;
   private wingmanFireTimer = 0;
 
+  // Mutagen system
+  private mutagenState: MutagenState = createMutagenState();
+  private mutagenStats = computeMutagenStats([]);
+  private mutagenAnnouncement = '';
+  private mutagenAnnouncementTimer = 0;
+
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
     this.keys.add(event.code);
@@ -489,6 +512,8 @@ export class FlightScene {
       this.legacyState = loadLegacyState();
       this.salvageCollection = loadSalvageCollection();
       this.salvageRunCount = this.salvageCollection.totalAttempts;
+      this.mutagenState = loadMutagenState();
+      this.mutagenStats = computeMutagenStats(this.mutagenState.mutations);
       // Deploy saved wingman if one is selected
       const savedWingman = loadWingmanConfig();
       if (savedWingman) {
@@ -552,6 +577,10 @@ export class FlightScene {
     if (this.salvageAnnouncementTimer > 0) {
       this.salvageAnnouncementTimer -= dt;
       if (this.salvageAnnouncementTimer <= 0) this.salvageAnnouncement = '';
+    }
+    if (this.mutagenAnnouncementTimer > 0) {
+      this.mutagenAnnouncementTimer -= dt;
+      if (this.mutagenAnnouncementTimer <= 0) this.mutagenAnnouncement = '';
     }
     this.updateAbilities(dt);
     this.updateHealthBars();
@@ -805,6 +834,10 @@ export class FlightScene {
     this.legacyFinalized = false;
     this.legacyNewMilestones = [];
     this.runSalvagedEntries = [];
+    this.mutagenState = { ...this.mutagenState, pendingEssence: [] };
+    this.mutagenStats = computeMutagenStats(this.mutagenState.mutations);
+    this.mutagenAnnouncement = '';
+    this.mutagenAnnouncementTimer = 0;
     // Reset wingman for new run (respawn if was deployed)
     if (this.wingmanState.config) {
       this.wingmanState = { ...createWingmanState(), config: this.wingmanState.config };
@@ -824,6 +857,16 @@ export class FlightScene {
     if (this.isEndlessMode) {
       this.applyLegacyBonuses();
     }
+    // Apply permanent mutagen stats
+    const mutagenMods = computeMutagenStats(this.mutagenState.mutations);
+    this.player.stats.maxHp = Math.round(this.player.stats.maxHp * mutagenMods.maxHpMultiplier);
+    this.player.stats.shieldStrength = Math.round(this.player.stats.shieldStrength * mutagenMods.shieldMultiplier);
+    this.player.stats.thrust *= mutagenMods.thrustMultiplier;
+    this.player.stats.armorRating += mutagenMods.armorBonus;
+    this.player.maxShield = this.player.stats.shieldStrength;
+    this.player.shield = Math.min(this.player.shield, this.player.maxShield);
+    this.player.hp = Math.min(this.player.hp, this.player.stats.maxHp);
+    this.mutagenStats = mutagenMods;
     this.spawnDronesForShip(this.player);
     if (this.encounterObjective.type === 'protect_ally') {
       const preset = getEncounterPreset(this.encounterId);
@@ -1217,7 +1260,7 @@ export class FlightScene {
 
     // Mutator: Last Stand fire rate boost
     const lastStand = ship.team === 'player' ? lastStandBonuses(this.activeMutators, this.player.hp / Math.max(1, this.player.stats.maxHp)) : { damageMult: 1, fireRateMult: 1 };
-    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier * getOverdriveFireRateMult(this.overdriveState) * lastStand.fireRateMult : (ship.affixFireRateMult ?? 1);
+    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier * getOverdriveFireRateMult(this.overdriveState) * lastStand.fireRateMult * this.mutagenStats.fireRateMultiplier : (ship.affixFireRateMult ?? 1);
     const effectiveCadence = getEffectiveWeaponCadence(
       Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
       ship.powerFactor,
@@ -1228,7 +1271,7 @@ export class FlightScene {
 
     const normalizedDirection = direction.clone().normalize();
     const momentumMult = ship.team === 'player' ? momentumDamageMult(this.activeMutators, ship.velocity.length()) : 1;
-    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier * getOverdriveDamageMult(this.overdriveState) * lastStand.damageMult * momentumMult : (ship.affixDamageMult ?? 1);
+    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier * getOverdriveDamageMult(this.overdriveState) * lastStand.damageMult * momentumMult * this.mutagenStats.damageMultiplier : (ship.affixDamageMult ?? 1);
     const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier);
 
     if (weapon.archetype === 'beam') {
@@ -1531,9 +1574,40 @@ export class FlightScene {
       this.handleAffixExplosion(ship);
       // Blueprint scavenging (elite/boss kill)
       this.handleSalvageOnKill(ship);
+      // Mutagen: collect essence from elite/boss kills
+      if (this.isEndlessMode && ship.team === 'enemy') {
+        const killedAffixes = this.shipAffixes.get(ship.id);
+        if (killedAffixes && killedAffixes.length >= 2) {
+          const affixIds = killedAffixes.map(a => a.def.id as MutagenId);
+          this.mutagenState = collectEssenceFromKill(
+            this.mutagenState, affixIds, !!ship.isBoss, this.currentWave,
+          );
+          persistMutagenState(this.mutagenState);
+          if (this.mutagenState.pendingEssence.length > 0) {
+            this.mutagenAnnouncement = `🧬 Essence collected! (${this.mutagenState.pendingEssence.length}/${MAX_ESSENCE_SLOTS})`;
+            this.mutagenAnnouncementTimer = 2;
+          }
+        }
+      }
       // Bigger screen shake for player death
       if (ship.team === 'player') {
         this.screenShake = createScreenShake(0.8, 0.5);
+        // Mutagen: death explosion
+        if (hasDeathExplosion(this.mutagenState.mutations)) {
+          const dmg = getDeathExplosionDamage(this.mutagenState.mutations);
+          for (const enemy of this.ships) {
+            if (!enemy.alive || enemy.team !== 'enemy') continue;
+            const dist = this.player.position.distanceTo(enemy.position);
+            if (dist < 5) {
+              const falloffDmg = Math.round(dmg * (1 - dist / 5 * 0.5));
+              this.applyDamage(enemy, falloffDmg, 'kinetic', 0.5, 0);
+            }
+          }
+          for (const config of ParticleSystem.deathExplosion(this.player.position)) {
+            this.particles.emit(config);
+          }
+          this.screenShake = createScreenShake(0.6, 0.4);
+        }
       }
 
       // Track kills in endless mode
@@ -1736,6 +1810,13 @@ export class FlightScene {
       const affixData = this.shipAffixData.get(ship.id);
       if (affixData?.regeneratesHp && ship.alive && ship.hp < ship.stats.maxHp) {
         ship.hp = Math.min(ship.stats.maxHp, ship.hp + ship.stats.maxHp * 0.05 * dt);
+      }
+      // Mutagen: player HP regeneration
+      if (ship.id === this.player.id && ship.alive) {
+        const regenRate = getHpRegenRate(this.mutagenState.mutations);
+        if (regenRate > 0 && ship.hp < ship.stats.maxHp) {
+          ship.hp = Math.min(ship.stats.maxHp, ship.hp + ship.stats.maxHp * regenRate * dt);
+        }
       }
     }
   }
@@ -2347,13 +2428,34 @@ export class FlightScene {
 
       const mutatorSlots = `Mutators: ${this.activeMutators.length}/${MAX_MUTATORS}`;
 
+      // Mutagen: essence extraction panel
+      const essenceCards = this.mutagenState.pendingEssence.map((e, i) => {
+        const def = getMutationDef(e.affixId);
+        if (!def) return '';
+        const existingStacks = getMutationStacks(this.mutagenState.mutations, e.affixId);
+        const isStacking = existingStacks > 0;
+        return `<div class="upgrade-card" style="border-color:${def.color};background:rgba(${parseInt(def.color.slice(1,3),16)},${parseInt(def.color.slice(3,5),16)},${parseInt(def.color.slice(5,7),16)},0.06)">
+          <div style="font-size:0.7em;color:${def.color};margin-bottom:2px">🧬 ESSENCE — Free</div>
+          <div style="font-size:1.3em">${def.icon}</div>
+          <strong style="color:${def.color}">${def.displayName}</strong>
+          ${isStacking ? `<small style="color:${def.color}">→ ${existingStacks + 1} stacks</small>` : '<small style="color:#94a3b8">New mutation</small>'}
+          <p style="margin:4px 0">${def.description}</p>
+          <small style="color:#64748b;font-style:italic">${isStacking ? def.stackDescription : def.flavor}</small>
+          <button class="primary" data-absorb="${i}" style="font-size:0.85em;background:${def.color};border-color:${def.color}">
+            Absorb
+          </button>
+        </div>`;
+      }).join('');
+
       hud.innerHTML = `
         <div style="text-align:center;margin-bottom:8px">
           <strong style="font-size:1.1em;color:#e2e8f0">⚡ Upgrade Shop — Wave ${this.shopWaveCleared} Cleared</strong>
           ${restRepair ? '<p class="success">🔧 Rest stop: hull partially repaired!</p>' : ''}
         </div>
         ${mutatorCards ? `<div style="text-align:center;margin-bottom:6px"><span style="color:#c084fc;font-size:0.85em;font-weight:600">— Offered Trait —</span></div><div class="upgrade-grid">${mutatorCards}</div>` : ''}
-        ${mutatorCards && upgradeCards.length > 0 ? '<div style="text-align:center;margin:8px 0"><span style="color:#64748b">— or —</span></div>' : ''}
+        ${essenceCards ? `<div style="text-align:center;margin-bottom:6px"><span style="color:#34d399;font-size:0.85em;font-weight:600">— Absorb Essence (${this.mutagenState.pendingEssence.length}/${MAX_ESSENCE_SLOTS}) —</span></div><div class="upgrade-grid">${essenceCards}</div>` : ''}
+        ${essenceCards && upgradeCards.length > 0 ? '<div style="text-align:center;margin:8px 0"><span style="color:#64748b">— or —</span></div>' : ''}
+        ${!essenceCards && mutatorCards && upgradeCards.length > 0 ? '<div style="text-align:center;margin:8px 0"><span style="color:#64748b">— or —</span></div>' : ''}
         ${upgradeCards.length > 0 ? `<div class="upgrade-grid">${upgradeCards}</div>` : '<p class="muted" style="text-align:center">No upgrades available</p>'}
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
           <span style="color:#fbbf24">💰 ${this.endlessCredits} credits</span>
@@ -2377,6 +2479,17 @@ export class FlightScene {
         btn.addEventListener('click', () => {
           const idx = parseInt((btn as HTMLElement).dataset.mutator ?? '0', 10);
           if (this.shopMutatorOptions[idx]) this.purchaseMutator(this.shopMutatorOptions[idx]);
+        });
+      });
+      // Bind mutagen essence absorb buttons
+      hud.querySelectorAll('[data-absorb]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt((btn as HTMLElement).dataset.absorb ?? '0', 10);
+          this.mutagenState = absorbEssence(this.mutagenState, idx);
+          persistMutagenState(this.mutagenState);
+          this.mutagenStats = computeMutagenStats(this.mutagenState.mutations);
+          this.rebuildPlayerWithUpgrades();
+          this.refreshHud();
         });
       });
       return;
@@ -2442,6 +2555,7 @@ export class FlightScene {
       ${this.bossAnnouncement ? `<p style=\"font-size:1.2em;color:#ef4444;font-weight:700;text-shadow:0 0 10px rgba(239,68,68,0.6)\">${this.bossAnnouncement}</p>` : ''}
       ${this.bossWarning ? `<p style=\"font-size:1em;color:#f97316;font-weight:600;text-shadow:0 0 6px rgba(249,115,22,0.5)\">${this.bossWarning}</p>` : ''}
       ${this.salvageAnnouncement ? `<p style=\"font-size:1.05em;color:#c084fc;font-weight:600;text-shadow:0 0 8px rgba(192,132,252,0.5)\">${this.salvageAnnouncement}</p>` : ''}
+      ${this.mutagenAnnouncement ? `<div style="color:#34d399;font-size:0.9em;text-align:center;text-shadow:0 0 8px #34d399">${this.mutagenAnnouncement}</div>` : ''}
       ${this.bossShip && this.bossShip.alive ? (() => {
         const bHp = Math.max(0, this.bossShip.hp);
         const bMax = this.bossShip.stats.maxHp;
@@ -2462,6 +2576,15 @@ export class FlightScene {
       ${isOverdriveActive(this.overdriveState) ? `<div class=\"overdrive-vignette\" style=\"opacity:${0.3 + 0.2 * Math.sin(this.elapsedEncounterSeconds * 8)}\"></div>` : ''}
       ${this.playerBuffs.length > 0 ? `<div class="ability-bar">${this.playerBuffs.map((b) => `<div class="ability-slot active" title="${b.kind === 'power_surge' ? 'Power Surge' : 'Rapid Fire'} — ${b.remaining.toFixed(1)}s"><span class="ability-icon">${b.kind === 'power_surge' ? '⚡' : '🔥'}</span><span class="ability-fill active-fill" style="width:${(b.remaining / b.duration) * 100}%"></span></div>`).join('')}</div>` : ''}
       ${this.activeMutators.length > 0 ? `<div class="ability-bar" style="justify-content:center;gap:6px">${this.activeMutators.map((m) => `<div class="ability-slot active" title="${m.def.displayName}: ${m.def.description}" style="border-color:#c084fc"><span class="ability-icon">${m.def.icon}</span></div>`).join('')}</div>` : ''}
+      ${hasMutations(this.mutagenState) ? `
+        <div class="ability-bar" style="border-color:#34d399;margin-top:2px">
+          <span style="color:#34d399;font-size:0.7em;font-weight:600">MUTATIONS</span>
+          ${this.mutagenState.mutations.map(m => {
+            const def = getMutationDef(m.id);
+            if (!def) return '';
+            return `<span style="color:${def.color}" title="${def.description} (${m.stacks} stack${m.stacks > 1 ? 's' : ''})">${def.icon}${m.stacks > 1 ? '×' + m.stacks : ''}</span>`;
+          }).join('')}
+        </div>` : ''}
       ${!this.player.alive
         ? this.isEndlessMode
           ? `<p class="warning">Ship disabled · Wave ${this.currentWave} · ${this.endlessTotalKills} kills · Score: ${this.endlessScore.toLocaleString()}</p>`
@@ -2847,6 +2970,21 @@ export class FlightScene {
             this.handleAffixExplosion(ship);
             // Blueprint scavenging (elite/boss kill — beam death path)
             this.handleSalvageOnKill(ship);
+            // Mutagen: collect essence from elite/boss kills (beam path)
+            if (this.isEndlessMode && ship.team === 'enemy') {
+              const essenceAffixes = this.shipAffixes.get(ship.id);
+              if (essenceAffixes && essenceAffixes.length >= 2) {
+                const affixIds = essenceAffixes.map(a => a.def.id as MutagenId);
+                this.mutagenState = collectEssenceFromKill(
+                  this.mutagenState, affixIds, !!ship.isBoss, this.currentWave,
+                );
+                persistMutagenState(this.mutagenState);
+                if (this.mutagenState.pendingEssence.length > 0) {
+                  this.mutagenAnnouncement = `🧬 Essence collected! (${this.mutagenState.pendingEssence.length}/${MAX_ESSENCE_SLOTS})`;
+                  this.mutagenAnnouncementTimer = 2;
+                }
+              }
+            }
             if (this.isEndlessMode && ship.team === 'enemy') {
               this.endlessTotalKills += 1;
               const killedAffixes = this.shipAffixes.get(ship.id);
@@ -3506,6 +3644,15 @@ export class FlightScene {
     this.player.maxShield += s.shieldBonus;
     this.player.shield = Math.min(this.player.shield + s.shieldBonus, this.player.maxShield);
     this.player.hp = Math.min(this.player.hp + s.maxHpBonus, this.player.stats.maxHp);
+
+    // Apply permanent mutagen stats
+    this.player.stats.maxHp = Math.round(this.player.stats.maxHp * this.mutagenStats.maxHpMultiplier);
+    this.player.stats.shieldStrength = Math.round(this.player.stats.shieldStrength * this.mutagenStats.shieldMultiplier);
+    this.player.stats.thrust *= this.mutagenStats.thrustMultiplier;
+    this.player.stats.armorRating += this.mutagenStats.armorBonus;
+    this.player.maxShield = this.player.stats.shieldStrength;
+    this.player.shield = Math.min(this.player.shield, this.player.maxShield);
+    this.player.hp = Math.min(this.player.hp, this.player.stats.maxHp);
   }
 
   private renderComboHud(): string {
