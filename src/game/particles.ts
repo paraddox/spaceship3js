@@ -322,6 +322,70 @@ export class ParticleSystem {
     };
   }
 
+  // ── Boss Encounter VFX ──
+
+  static bossPhaseTransition(position: THREE.Vector3): ParticleConfig {
+    return {
+      position: position.clone().setY(0.5),
+      count: 40,
+      speed: [4, 10],
+      life: [0.4, 1.0],
+      gravity: -2,
+      startScale: [0.3, 0.6],
+      endScale: [0, 0.05],
+      startOpacity: 1.0,
+      endOpacity: 0,
+      color: '#ef4444',
+      drag: 2,
+    };
+  }
+
+  static bossTelegraphPulse(position: THREE.Vector3, color = '#f97316'): ParticleConfig {
+    return {
+      position: position.clone().setY(0.1),
+      count: 8,
+      speed: [1, 3],
+      life: [0.2, 0.5],
+      startScale: [0.15, 0.3],
+      endScale: [0, 0.05],
+      startOpacity: 0.7,
+      endOpacity: 0,
+      color,
+      drag: 4,
+    };
+  }
+
+  static bossShockwaveRing(position: THREE.Vector3, color = '#fbbf24'): ParticleConfig {
+    return {
+      position: position.clone().setY(0.2),
+      count: 20,
+      speed: [6, 14],
+      life: [0.3, 0.6],
+      startScale: [0.2, 0.4],
+      endScale: [0, 0.05],
+      startOpacity: 0.8,
+      endOpacity: 0,
+      color,
+      drag: 1,
+    };
+  }
+
+  static bossDeathExplosion(position: THREE.Vector3): ParticleConfig {
+    return {
+      position: position.clone().setY(0.5),
+      count: 60,
+      speed: [5, 15],
+      life: [0.5, 1.5],
+      gravity: -3,
+      startScale: [0.3, 0.7],
+      endScale: [0, 0.05],
+      startOpacity: 1.0,
+      endOpacity: 0,
+      color: '#fbbf24',
+      drag: 1.5,
+    };
+  }
+
   // ── Internal ──
 
   private findInactive(): Particle | null {

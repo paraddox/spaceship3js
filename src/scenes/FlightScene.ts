@@ -187,6 +187,29 @@ import {
   DEFAULT_LEGACY_STATE,
   MAX_ACTIVE_BONUSES,
 } from '../game/legacy';
+import {
+  createBossAI,
+  updateBossAI,
+  isBossVulnerable,
+  isBossWave,
+  isBossAttackActive,
+  getActiveBossAttack,
+  getBossPhaseMultipliers,
+  getBossPhaseAnnouncement,
+  getBossWarningText,
+  getBossHpMultiplier,
+  getBossName,
+  isPointInBossAttackArea,
+  getPhaseDef,
+  type BossAIState,
+  type BossTelegraph,
+} from '../game/boss-encounters';
+import {
+  playBossPhaseTransition,
+  playBossTelegraph,
+  playBossAttack,
+  playBossDefeated,
+} from '../game/audio';
 
 const REPAIR_HP_FRACTION = 0.75;
 
@@ -234,6 +257,8 @@ interface RuntimeShip {
   affixThrustMult?: number;
   /** Affix-based armor bonus. */
   affixArmorBonus?: number;
+  /** Whether this ship is a boss (endless mode boss waves). */
+  isBoss?: boolean;
 }
 
 interface Projectile {
@@ -311,6 +336,16 @@ export class FlightScene {
   private endlessCredits = 0;
   /** Accumulated elite credit bonus for the current wave, applied on wave clear. */
   private endlessWaveEliteBonus = 0;
+
+  // Boss encounter system
+  private bossAI: BossAIState | null = null;
+  private bossShip: RuntimeShip | null = null;
+  private bossAnnouncement = '';
+  private bossAnnouncementTimer = 0;
+  private bossWarning = '';
+  private bossTelegraphPlayed = false;
+  private bossAttackPlayed = false;
+  private readonly bossTelegraphGroup = new THREE.Group();
 
   // Run report card stats
   private runStats: RunStats = { ...DEFAULT_RUN_STATS };
@@ -402,7 +437,7 @@ export class FlightScene {
     const ambient = new THREE.AmbientLight(0xffffff, 1.2);
     const rim = new THREE.DirectionalLight(0xbfe1ff, 1.1);
     rim.position.set(8, 10, 6);
-    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup, this.healthBarGroup, this.particles.group, this.hazardGroup, this.pickupGroup);
+    this.scene.add(ambient, rim, this.arenaGroup, this.projectileGroup, this.effectGroup, this.healthBarGroup, this.particles.group, this.hazardGroup, this.pickupGroup, this.bossTelegraphGroup);
 
     this.buildArena();
     this.buildProjectiles();
@@ -440,6 +475,7 @@ export class FlightScene {
     this.updatePickups(dt);
     this.updatePlayerBuffs(dt);
     this.updateCombo(dt);
+    this.updateBoss(dt);
     // Fade out elite announcement
     if (this.eliteAnnouncementTimer > 0) {
       this.eliteAnnouncementTimer -= dt;
@@ -672,6 +708,14 @@ export class FlightScene {
     this.eliteAnnouncementTimer = 0;
     this.shipAffixData.clear();
     this.shipAffixes.clear();
+    this.bossAI = null;
+    this.bossShip = null;
+    this.bossAnnouncement = '';
+    this.bossAnnouncementTimer = 0;
+    this.bossWarning = '';
+    this.bossTelegraphPlayed = false;
+    this.bossAttackPlayed = false;
+    this.clearBossTelegraphs();
     this.runStats = { ...DEFAULT_RUN_STATS };
     this.upgradeStats = defaultLiveUpgradeStats();
     this.purchasedUpgrades = [];
@@ -715,6 +759,18 @@ export class FlightScene {
 
     this.waveAnnouncement = `${wave.name} deployed`;
 
+    // Boss wave initialization (endless mode, every 5th wave)
+    const bossWave = this.isEndlessMode && isBossWave(waveNumber);
+    if (bossWave) {
+      this.bossAI = createBossAI(waveNumber);
+      this.bossAnnouncement = `⚠ BOSS — ${getBossName(waveNumber)}`;
+      this.bossAnnouncementTimer = 3.5;
+      this.clearBossTelegraphs();
+    } else {
+      this.bossAI = null;
+      this.bossShip = null;
+    }
+
     // Spawn hazards for this wave (replacing previous wave's hazards)
     this.clearHazards();
     if (wave.hazards && wave.hazards.length > 0) {
@@ -731,6 +787,19 @@ export class FlightScene {
         enemy.preferredRange,
         enemy.fireJitter,
       );
+      // Mark boss ships and apply HP scaling
+      if (bossWave) {
+        runtimeShip.isBoss = true;
+        const hpMult = getBossHpMultiplier(waveNumber);
+        runtimeShip.hp *= hpMult;
+        runtimeShip.stats.maxHp *= hpMult;
+        // Scale module HP to match
+        for (const mod of runtimeShip.moduleStates) {
+          mod.maxHp *= hpMult;
+          mod.currentHp *= hpMult;
+        }
+        if (!this.bossShip) this.bossShip = runtimeShip;
+      }
       this.ships.push(runtimeShip);
       this.spawnDronesForShip(runtimeShip);
       // Apply elite affix stat modifications
@@ -1284,6 +1353,8 @@ export class FlightScene {
   private applyDamage(ship: RuntimeShip, rawDamage: number, damageType: DamageType, armorPenetration: number, hitAngle: number): void {
     // Player is invulnerable during dash
     if (ship.team === 'player' && isInvulnerable(this.dashState)) return;
+    // Boss is invulnerable during phase transitions
+    if (ship.isBoss && this.bossAI && !isBossVulnerable(this.bossAI)) return;
     const result: DamageResult = resolveDamage(
       rawDamage,
       damageType,
@@ -1375,6 +1446,19 @@ export class FlightScene {
       // Track kills in endless mode
       if (this.isEndlessMode && ship.team === 'enemy') {
         this.endlessTotalKills += 1;
+        // Boss kill tracking
+        if (ship.isBoss) {
+          this.runStats.bossKills += 1;
+          if (this.bossAI) this.bossAI = { ...this.bossAI, defeated: true };
+          this.bossShip = null;
+          playBossDefeated();
+          this.particles.emit(ParticleSystem.bossDeathExplosion(ship.position));
+          this.screenShake = createScreenShake(1.0, 0.8);
+          this.bossAnnouncement = '🏆 BOSS DEFEATED';
+          this.bossAnnouncementTimer = 3;
+          this.bossWarning = '';
+          this.clearBossTelegraphs();
+        }
         // Elite credit bonus
         const killedAffixes = this.shipAffixes.get(ship.id);
         const killedIsElite = killedAffixes && killedAffixes.length >= 2;
@@ -2187,6 +2271,25 @@ export class FlightScene {
       ${this.pickupAnnouncement ? `<p class="success" style="font-size:0.9em">${this.pickupAnnouncement}</p>` : ''}
       ${this.comboState.tierAnnouncement ? `<p style="font-size:1.1em;color:${getComboTier(this.comboState.kills).color};font-weight:700;text-shadow:0 0 8px ${getComboTier(this.comboState.kills).color}">${this.comboState.tierAnnouncement}</p>` : ''}
       ${this.eliteAnnouncement ? `<p style=\"font-size:1em;color:#fbbf24;font-weight:600;text-shadow:0 0 6px rgba(251,191,36,0.5)\">${this.eliteAnnouncement}</p>` : ''}
+      ${this.bossAnnouncement ? `<p style=\"font-size:1.2em;color:#ef4444;font-weight:700;text-shadow:0 0 10px rgba(239,68,68,0.6)\">${this.bossAnnouncement}</p>` : ''}
+      ${this.bossWarning ? `<p style=\"font-size:1em;color:#f97316;font-weight:600;text-shadow:0 0 6px rgba(249,115,22,0.5)\">${this.bossWarning}</p>` : ''}
+      ${this.bossShip && this.bossShip.alive ? (() => {
+        const bHp = Math.max(0, this.bossShip.hp);
+        const bMax = this.bossShip.stats.maxHp;
+        const bRatio = bMax > 0 ? bHp / bMax : 0;
+        const bPhase = this.bossAI ? getPhaseDef(this.bossAI.phaseIndex) : null;
+        return `<div style=\"margin:6px 0;padding:4px 8px;border:1px solid #ef4444;border-radius:4px;background:rgba(239,68,68,0.1)\">
+          <div style=\"display:flex;justify-content:space-between;align-items:center;margin-bottom:4px\">
+            <strong style=\"color:#ef4444;font-size:0.85em\">💀 ${getBossName(this.currentWave)}</strong>
+            ${bPhase ? `<span style=\"color:#f97316;font-size:0.75em\">${bPhase.displayName}</span>` : ''}
+          </div>
+          <div style=\"height:8px;background:#1e1e1e;border-radius:4px;overflow:hidden\">
+            <div style=\"width:${bRatio * 100}%;height:100%;background:linear-gradient(90deg,#ef4444,#f97316);transition:width 0.3s\"></div>
+          </div>
+          <span style=\"font-size:0.7em;color:#94a3b8\">${bHp.toFixed(0)} / ${bMax.toFixed(0)}</span>
+          ${this.bossAI?.transitioning ? '<span style=\"font-size:0.7em;color:#fbbf24;margin-left:8px">⚡ INVULNERABLE</span>' : ''}
+        </div>`;
+      })() : ''}
       ${isOverdriveActive(this.overdriveState) ? `<div class=\"overdrive-vignette\" style=\"opacity:${0.3 + 0.2 * Math.sin(this.elapsedEncounterSeconds * 8)}\"></div>` : ''}
       ${this.playerBuffs.length > 0 ? `<div class="ability-bar">${this.playerBuffs.map((b) => `<div class="ability-slot active" title="${b.kind === 'power_surge' ? 'Power Surge' : 'Rapid Fire'} — ${b.remaining.toFixed(1)}s"><span class="ability-icon">${b.kind === 'power_surge' ? '⚡' : '🔥'}</span><span class="ability-fill active-fill" style="width:${(b.remaining / b.duration) * 100}%"></span></div>`).join('')}</div>` : ''}
       ${this.activeMutators.length > 0 ? `<div class="ability-bar" style="justify-content:center;gap:6px">${this.activeMutators.map((m) => `<div class="ability-slot active" title="${m.def.displayName}: ${m.def.description}" style="border-color:#c084fc"><span class="ability-icon">${m.def.icon}</span></div>`).join('')}</div>` : ''}
@@ -2776,6 +2879,189 @@ export class FlightScene {
     if (prev === 'active' && this.overdriveState.phase !== 'active') {
       this.screenShake = createScreenShake(0.3, 0.2);
       playOverdriveDeactivate();
+    }
+  }
+
+  // ── Boss Encounter System ──────────────────────────────────
+
+  private updateBoss(dt: number): void {
+    if (!this.bossAI || !this.bossShip || !this.bossShip.alive) return;
+
+    const prev = { ...this.bossAI };
+    this.bossAI = updateBossAI(
+      this.bossAI,
+      dt,
+      this.bossShip.hp,
+      this.bossShip.stats.maxHp,
+      { x: this.bossShip.position.x, z: this.bossShip.position.z },
+      { x: this.player.position.x, z: this.player.position.z },
+    );
+
+    // Phase transition VFX + audio
+    if (!prev.transitioning && this.bossAI.transitioning) {
+      playBossPhaseTransition();
+      this.particles.emit(ParticleSystem.bossPhaseTransition(this.bossShip.position));
+      const ann = getBossPhaseAnnouncement(this.bossAI);
+      if (ann) {
+        this.bossAnnouncement = ann;
+        this.bossAnnouncementTimer = 3;
+      }
+    }
+
+    // Telegraph started
+    if (this.bossAI.telegraphing && !prev.telegraphing) {
+      this.bossTelegraphPlayed = false;
+    }
+    // Play telegraph audio once
+    if (this.bossAI.telegraphing && !this.bossTelegraphPlayed) {
+      playBossTelegraph();
+      this.bossTelegraphPlayed = true;
+    }
+
+    // Attack went active
+    if (this.bossAI.activeAttack && !prev.activeAttack) {
+      playBossAttack();
+      this.bossAttackPlayed = true;
+      this.particles.emit(ParticleSystem.bossShockwaveRing(this.bossShip.position));
+    }
+
+    // Boss attack damages player
+    if (isBossAttackActive(this.bossAI)) {
+      const attack = getActiveBossAttack(this.bossAI);
+      if (attack && this.player.alive) {
+        const inArea = isPointInBossAttackArea(
+          this.bossAI,
+          { x: this.player.position.x, z: this.player.position.z },
+          { x: this.bossShip.position.x, z: this.bossShip.position.z },
+        );
+        if (inArea) {
+          const mults = getBossPhaseMultipliers(this.bossAI);
+          this.applyDamage(this.player, attack.damage * mults.damageMult * dt * 2, 'kinetic', 0.3, 0);
+        }
+      }
+    }
+
+    // Warning text
+    const warning = getBossWarningText(this.bossAI);
+    this.bossWarning = warning ?? '';
+
+    // Tick announcement
+    if (this.bossAnnouncementTimer > 0) {
+      this.bossAnnouncementTimer -= dt;
+      if (this.bossAnnouncementTimer <= 0) this.bossAnnouncement = '';
+    }
+
+    // Update telegraph visuals
+    this.updateBossTelegraphVisuals(dt);
+
+    // Override boss movement during charge attacks
+    if (this.bossAI.chargeTarget && this.bossAI.activeAttack) {
+      const target = this.bossAI.chargeTarget;
+      const dir = new THREE.Vector3(target.x - this.bossShip.position.x, 0, target.z - this.bossShip.position.z);
+      const dist = dir.length();
+      if (dist > 0.5) {
+        dir.normalize();
+        this.bossShip.velocity.copy(dir.multiplyScalar(12));
+        this.bossShip.position.addScaledVector(this.bossShip.velocity, dt);
+        this.clampToArena(this.bossShip.position);
+      }
+    }
+  }
+
+  private updateBossTelegraphVisuals(dt: number): void {
+    if (!this.bossAI) return;
+
+    // Clear old telegraph meshes
+    while (this.bossTelegraphGroup.children.length > 0) {
+      const child = this.bossTelegraphGroup.children[0];
+      this.bossTelegraphGroup.remove(child);
+      if (child instanceof THREE.Mesh) {
+        child.geometry.dispose();
+        (child.material as THREE.Material).dispose();
+      }
+    }
+
+    // Render active telegraphs as pulsing circles
+    for (const telegraph of this.bossAI.telegraphs) {
+      const progress = 1 - telegraph.timeRemaining / telegraph.duration;
+      const radius = telegraph.radius;
+
+      // Warning ring
+      const ringGeo = new THREE.RingGeometry(Math.max(0.1, radius - 0.15), radius + 0.15, 32);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0xff4444,
+        transparent: true,
+        opacity: 0.3 + progress * 0.5,
+        side: THREE.DoubleSide,
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(telegraph.position.x, 0.15, telegraph.position.z);
+      this.bossTelegraphGroup.add(ring);
+
+      // Inner fill
+      const fillGeo = new THREE.CircleGeometry(radius, 32);
+      const fillMat = new THREE.MeshBasicMaterial({
+        color: 0xff2222,
+        transparent: true,
+        opacity: progress * 0.15,
+        side: THREE.DoubleSide,
+      });
+      const fill = new THREE.Mesh(fillGeo, fillMat);
+      fill.rotation.x = -Math.PI / 2;
+      fill.position.set(telegraph.position.x, 0.1, telegraph.position.z);
+      this.bossTelegraphGroup.add(fill);
+    }
+
+    // Render beam sweep indicator
+    if (this.bossAI.activeAttack?.id === 'beam_sweep' && this.bossShip) {
+      const beamLen = 20;
+      const beamWidth = 0.4;
+      const beamGeo = new THREE.PlaneGeometry(beamWidth, beamLen);
+      const beamMat = new THREE.MeshBasicMaterial({
+        color: 0xff0066,
+        transparent: true,
+        opacity: 0.6 + Math.sin(performance.now() * 0.01) * 0.2,
+        side: THREE.DoubleSide,
+      });
+      const beam = new THREE.Mesh(beamGeo, beamMat);
+      beam.rotation.x = -Math.PI / 2;
+      beam.position.set(this.bossShip.position.x, 0.2, this.bossShip.position.z);
+      beam.rotation.z = this.bossAI.beamSweepAngle;
+      this.bossTelegraphGroup.add(beam);
+    }
+
+    // Shockwave visual ring
+    if (this.bossAI.activeAttack?.id === 'shockwave' && this.bossShip) {
+      const swRadius = this.bossAI.shockwaveRadius;
+      if (swRadius > 0.5) {
+        const swGeo = new THREE.RingGeometry(
+          Math.max(0.1, swRadius - 0.8),
+          swRadius + 0.2,
+          48,
+        );
+        const swMat = new THREE.MeshBasicMaterial({
+          color: 0xfbbf24,
+          transparent: true,
+          opacity: 0.5 * (1 - swRadius / (this.bossAI.shockwaveMaxRadius || 12)),
+          side: THREE.DoubleSide,
+        });
+        const sw = new THREE.Mesh(swGeo, swMat);
+        sw.rotation.x = -Math.PI / 2;
+        sw.position.set(this.bossShip.position.x, 0.15, this.bossShip.position.z);
+        this.bossTelegraphGroup.add(sw);
+      }
+    }
+  }
+
+  private clearBossTelegraphs(): void {
+    while (this.bossTelegraphGroup.children.length > 0) {
+      const child = this.bossTelegraphGroup.children[0];
+      this.bossTelegraphGroup.remove(child);
+      if (child instanceof THREE.Mesh) {
+        child.geometry.dispose();
+        (child.material as THREE.Material).dispose();
+      }
     }
   }
 

@@ -55,3 +55,34 @@ export function playOverdriveDeactivate(): void {
   tone(330, 0.35, 0.04, 'sine');
   tone(220, 0.4, 0.03, 'sawtooth');
 }
+
+// ── Boss Encounter Audio ──────────────────────────────────────
+
+export function playBossPhaseTransition(): void {
+  // Dramatic power surge — shields shifting, weapons cycling
+  tone(80, 0.5, 0.1, 'sawtooth');
+  tone(160, 0.4, 0.07, 'square');
+  tone(320, 0.3, 0.06, 'sine');
+  tone(640, 0.25, 0.05, 'sine');
+}
+
+export function playBossTelegraph(): void {
+  // Rising tension — warning incoming
+  tone(200, 0.15, 0.05, 'triangle');
+  tone(300, 0.2, 0.04, 'triangle');
+}
+
+export function playBossAttack(): void {
+  // Heavy impact — attack unleashed
+  tone(100, 0.3, 0.08, 'sawtooth');
+  tone(150, 0.2, 0.06, 'square');
+}
+
+export function playBossDefeated(): void {
+  // Triumphant destruction — boss explodes
+  tone(60, 0.6, 0.12, 'sawtooth');
+  tone(120, 0.5, 0.1, 'square');
+  tone(240, 0.4, 0.07, 'sine');
+  tone(480, 0.35, 0.06, 'sine');
+  tone(720, 0.3, 0.05, 'sine');
+}

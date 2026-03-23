@@ -521,7 +521,7 @@ export function isMilestoneCompleted(legacy: LegacyState, milestoneId: string): 
 export function getMilestoneProgress(
   legacy: LegacyState,
 ): { total: number; completed: number; byCategory: Record<string, { total: number; completed: number }> } {
-  const categories = new Set(MILESTONES.map((m) => m.category));
+  const categories = Array.from(new Set(MILESTONES.map((m) => m.category)));
   const byCategory: Record<string, { total: number; completed: number }> = {};
   for (const cat of categories) {
     const catMilestones = MILESTONES.filter((m) => m.category === cat);
