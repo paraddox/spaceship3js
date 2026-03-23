@@ -3,6 +3,7 @@ import type { ShipBlueprint } from '../core/types';
 import type { EncounterEnemy, EncounterWave } from './encounters';
 import { generateRandomHazards } from './hazards';
 import { DEFAULT_CREW_ALLOCATION } from './crew';
+import { rollAffixes } from './elite-affixes';
 
 // ── Procedural Wave Generator ─────────────────────────────────
 //
@@ -288,6 +289,7 @@ export function generateEndlessWave(waveNumber: number): EncounterWave {
       rotation: pos.rotation,
       preferredRange,
       fireJitter,
+      affixes: waveNumber >= 3 ? rollAffixes(waveNumber, isFrigate, seed + i * 53 + 11) : [],
     });
   }
 

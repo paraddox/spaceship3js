@@ -119,6 +119,14 @@ import {
   getComboTimerFraction,
   type ComboState,
 } from '../game/combo';
+import {
+  computeAffixStats,
+  isElite,
+  getAffixColor,
+  eliteCreditsMultiplier,
+  affixDisplayLabel,
+  type RolledAffix,
+} from '../game/elite-affixes';
 
 const REPAIR_HP_FRACTION = 0.75;
 
@@ -158,6 +166,14 @@ interface RuntimeShip {
   moduleStates: ModuleRuntimeState[];
   moduleMeshes: Map<string, THREE.Mesh>;
   abilities: AbilityRuntime[];
+  /** Affix-based damage multiplier (defaults to 1). */
+  affixDamageMult?: number;
+  /** Affix-based fire rate multiplier (defaults to 1). */
+  affixFireRateMult?: number;
+  /** Affix-based thrust multiplier (defaults to 1). */
+  affixThrustMult?: number;
+  /** Affix-based armor bonus. */
+  affixArmorBonus?: number;
 }
 
 interface Projectile {
@@ -608,6 +624,10 @@ export class FlightScene {
       );
       this.ships.push(runtimeShip);
       this.spawnDronesForShip(runtimeShip);
+      // Apply elite affix stat modifications
+      if (enemy.affixes && enemy.affixes.length > 0) {
+        this.applyAffixMods(runtimeShip, enemy.affixes);
+      }
     }
   }
 
@@ -2436,6 +2456,54 @@ export class FlightScene {
   private updateCombo(dt: number): void {
     if (!this.isEndlessMode) return;
     this.comboState = tickCombo(this.comboState, dt);
+  }
+
+  /** Map of ship ID → affix mods for tracking regeneration/explode. */
+  private shipAffixData = new Map<string, { regeneratesHp: boolean; explodesOnDeath: boolean }>();
+
+  private applyAffixMods(ship: RuntimeShip, affixes: RolledAffix[]): void {
+    const mods = computeAffixStats(affixes);
+
+    // Scale HP
+    const newMaxHp = Math.round(ship.stats.maxHp * mods.hpMultiplier);
+    ship.stats.maxHp = newMaxHp;
+    ship.hp = newMaxHp;
+
+    // Scale shield
+    if (ship.maxShield > 0) {
+      const newMaxShield = Math.round(ship.maxShield * mods.shieldMultiplier);
+      ship.maxShield = newMaxShield;
+      ship.shield = newMaxShield;
+    }
+
+    // Armor bonus
+    ship.stats.armorRating = Math.min(100, ship.stats.armorRating + mods.armorBonus);
+
+    // Store multipliers for use in combat/fire/thrust calculations
+    if (mods.damageMultiplier !== 1) ship.affixDamageMult = mods.damageMultiplier;
+    if (mods.fireRateMultiplier !== 1) ship.affixFireRateMult = mods.fireRateMultiplier;
+    if (mods.speedMultiplier !== 1) ship.affixThrustMult = mods.speedMultiplier;
+    if (mods.armorBonus > 0) ship.affixArmorBonus = mods.armorBonus;
+
+    // Track special affix behaviors
+    this.shipAffixData.set(ship.id, {
+      regeneratesHp: mods.regeneratesHp,
+      explodesOnDeath: mods.explodesOnDeath,
+    });
+
+    // Visual: tint enemy modules for affix color
+    const color = getAffixColor(affixes);
+    if (color) {
+      ship.group.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) {
+          const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
+          if (mat && mat.emissive) {
+            mat.emissive.set(color);
+            mat.emissiveIntensity = isElite(affixes) ? 0.5 : 0.25;
+          }
+        }
+      });
+    }
   }
 
   // ── Upgrade Shop ──────────────────────────────────────────────

@@ -4,6 +4,7 @@ import type { EncounterObjective } from './objectives';
 import type { HazardSpawn } from './hazards';
 import { DEFAULT_CREW_ALLOCATION } from './crew';
 import { createExampleBlueprint } from '../state/shipBlueprint';
+import type { RolledAffix } from './elite-affixes';
 
 export interface EncounterEnemy {
   id: string;
@@ -12,6 +13,8 @@ export interface EncounterEnemy {
   rotation: number;
   preferredRange: number;
   fireJitter: number;
+  /** Elite affixes rolled onto this enemy (endless mode only). */
+  affixes?: RolledAffix[];
 }
 
 export interface EncounterWave {
