@@ -217,6 +217,20 @@ import {
   persistSalvageCollection,
 } from '../game/salvage';
 import {
+  type WingmanState,
+  type WingmanConfig,
+  createWingmanState,
+  deployWingman,
+  killWingman,
+  updateWingmanTimers,
+  computeWingmanAI,
+  WINGMAN_FIRE_RATE_MULT,
+  WINGMAN_DAMAGE_MULT,
+  WINGMAN_RESPAWN_DELAY,
+  loadWingmanConfig,
+  persistWingmanConfig,
+} from '../game/wingman';
+import {
   playBossPhaseTransition,
   playBossTelegraph,
   playBossAttack,
@@ -281,6 +295,8 @@ interface RuntimeShip {
   affixArmorBonus?: number;
   /** Whether this ship is a boss (endless mode boss waves). */
   isBoss?: boolean;
+  /** Whether this ship is a wingman (AI companion). */
+  isWingman?: boolean;
 }
 
 interface Projectile {
@@ -425,6 +441,11 @@ export class FlightScene {
   private salvageAnnouncementTimer = 0;
   private runSalvagedEntries: SalvagedBlueprint[] = [];
 
+  // Wingman system
+  private wingmanState: WingmanState = createWingmanState();
+  private wingmanShip: RuntimeShip | null = null;
+  private wingmanFireTimer = 0;
+
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
     this.keys.add(event.code);
@@ -468,6 +489,14 @@ export class FlightScene {
       this.legacyState = loadLegacyState();
       this.salvageCollection = loadSalvageCollection();
       this.salvageRunCount = this.salvageCollection.totalAttempts;
+      // Deploy saved wingman if one is selected
+      const savedWingman = loadWingmanConfig();
+      if (savedWingman) {
+        const entry = this.salvageCollection.entries.find((e) => e.id === savedWingman.blueprintId);
+        if (entry) {
+          this.wingmanState = deployWingman(createWingmanState(), savedWingman);
+        }
+      }
     }
 
     const ambient = new THREE.AmbientLight(0xffffff, 1.2);
@@ -513,6 +542,7 @@ export class FlightScene {
     this.updateCombo(dt);
     this.updateBoss(dt);
     this.updateMusic(dt);
+    this.updateWingman(dt);
     // Fade out elite announcement
     if (this.eliteAnnouncementTimer > 0) {
       this.eliteAnnouncementTimer -= dt;
@@ -775,9 +805,20 @@ export class FlightScene {
     this.legacyFinalized = false;
     this.legacyNewMilestones = [];
     this.runSalvagedEntries = [];
+    // Reset wingman for new run (respawn if was deployed)
+    if (this.wingmanState.config) {
+      this.wingmanState = { ...createWingmanState(), config: this.wingmanState.config };
+      this.wingmanShip = null;
+      this.wingmanFireTimer = 0;
+    }
     this.waveAnnouncement = `${this.currentWave > 0 ? `Wave ${this.currentWave}` : 'Wave 1'} incoming...`;
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
+
+    // Spawn wingman if deployed
+    if (this.isEndlessMode && this.wingmanState.active && this.wingmanState.config) {
+      this.spawnWingman();
+    }
 
     // Apply legacy starting bonuses in endless mode
     if (this.isEndlessMode) {
@@ -2153,6 +2194,19 @@ export class FlightScene {
           ctx.arc(sx, sy, shieldR, 0, Math.PI * 2 * shieldRatio);
           ctx.stroke();
         }
+      } else if (ship.isWingman) {
+        // Wingman: smaller blue triangle with heading
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(-ship.rotation);
+        ctx.fillStyle = 'rgba(96, 165, 250, 0.9)';
+        ctx.beginPath();
+        ctx.moveTo(0, -5);
+        ctx.lineTo(-3.5, 4);
+        ctx.lineTo(3.5, 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
       } else if (ship.team === 'enemy') {
         // Boss: larger pulsing red diamond
         if (ship.isBoss) {
@@ -2362,7 +2416,8 @@ export class FlightScene {
         ${this.encounterObjective.type === 'protect_ally' ? `<div><span>Convoy Progress</span><strong>${(convoyProgress * 100).toFixed(0)}%</strong></div>` : ''}
         ${this.isEndlessMode ? `<div><span>Kills</span><strong>${this.endlessTotalKills}</strong></div>` : ''}
         ${this.isEndlessMode ? `<div><span>Score</span><strong>${this.endlessScore.toLocaleString()}</strong></div>` : ''}
-        ${this.isEndlessMode ? `<div><span>Credits</span><strong style="color:#fbbf24">💰 ${this.endlessCredits}</strong></div>` : ''}
+        ${this.isEndlessMode ? `<div><span>Credits</span><strong style=\"color:#fbbf24\">💰 ${this.endlessCredits}</strong></div>` : ''}
+        ${this.isEndlessMode && this.wingmanState.config ? `<div><span>Wingman</span><strong style="color:${this.wingmanState.active ? '#60a5fa' : '#64748b'}">${this.wingmanState.active ? `${this.wingmanState.config.name} ${(this.wingmanState.hpFraction * 100).toFixed(0)}%` : `Respawn ${this.wingmanState.respawnTimer.toFixed(0)}s`}</strong></div>` : ''}
         ${this.isEndlessMode && this.purchasedUpgrades.length > 0 ? `<div><span>Upgrades</span><strong>${this.purchasedUpgrades.length}</strong></div>` : ''}
       </div>
       <div class="ability-bar">
@@ -3642,6 +3697,107 @@ export class FlightScene {
       this.salvageAnnouncementTimer = 4;
       this.screenShake = createScreenShake(0.3, 0.2);
     }
+  }
+
+  // ── Wingman Methods ─────────────────────────────────────────
+
+  private spawnWingman(): void {
+    if (!this.wingmanState.config || !this.player) return;
+    const entry = this.salvageCollection.entries.find(
+      (e) => e.id === this.wingmanState.config!.blueprintId,
+    );
+    if (!entry) return;
+
+    const bp = entry.blueprint;
+    const pos = new THREE.Vector3(-3, 0, 6);
+    const ship = this.createShip('wingman-1', 'player', bp, pos, Math.PI, 12, 0.15);
+    ship.isWingman = true;
+    this.ships.push(ship);
+    this.wingmanShip = ship;
+  }
+
+  private updateWingman(dt: number): void {
+    if (!this.isEndlessMode || !this.wingmanState.config) return;
+
+    // Update respawn timer
+    if (!this.wingmanState.active) {
+      this.wingmanState = updateWingmanTimers(this.wingmanState, dt);
+      // Respawn
+      if (this.wingmanState.active && !this.wingmanShip) {
+        this.spawnWingman();
+      }
+      return;
+    }
+
+    if (!this.wingmanShip || !this.player) return;
+
+    // Check wingman alive
+    if (this.wingmanShip.hp <= 0) {
+      this.wingmanState = killWingman(this.wingmanState);
+      // Remove from ships array
+      const idx = this.ships.indexOf(this.wingmanShip);
+      if (idx >= 0) this.ships.splice(idx, 1);
+      this.wingmanShip = null;
+      return;
+    }
+
+    // Update hp fraction
+    this.wingmanState.hpFraction = this.wingmanShip.hp / this.wingmanShip.stats.maxHp;
+
+    // Gather enemy positions
+    const enemies = this.ships
+      .filter((s) => s.team === 'enemy' && s.alive)
+      .map((s) => ({
+        id: s.id,
+        x: s.group.position.x,
+        z: s.group.position.z,
+        alive: s.alive,
+      }));
+
+    const ai = computeWingmanAI({
+      playerX: this.player.group.position.x,
+      playerZ: this.player.group.position.z,
+      playerRotation: this.player.group.rotation.y,
+      wingmanX: this.wingmanShip.group.position.x,
+      wingmanZ: this.wingmanShip.group.position.z,
+      wingmanRotation: this.wingmanShip.group.rotation.y,
+      enemyPositions: enemies,
+      wingmanFireInterval: 0.5,
+    });
+
+    // Move wingman toward target position
+    const dx = ai.moveX - this.wingmanShip.group.position.x;
+    const dz = ai.moveZ - this.wingmanShip.group.position.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    if (dist > 0.5) {
+      const speed = 8 * dt;
+      const moveX = (dx / dist) * Math.min(speed, dist);
+      const moveZ = (dz / dist) * Math.min(speed, dist);
+      this.wingmanShip.group.position.x += moveX;
+      this.wingmanShip.group.position.z += moveZ;
+    }
+
+    // Rotate toward target
+    const angleDiff = ai.targetRotation - this.wingmanShip.group.rotation.y;
+    const wrapped = ((angleDiff + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    this.wingmanShip.group.rotation.y += wrapped * 5 * dt;
+
+    // Fire at target
+    if (ai.shouldFire && ai.targetId) {
+      this.wingmanFireTimer -= dt;
+      if (this.wingmanFireTimer <= 0) {
+        this.wingmanFireTimer = 0.5 / WINGMAN_FIRE_RATE_MULT;
+        const target = this.ships.find((s) => s.id === ai.targetId);
+        if (target && target.alive && this.wingmanShip) {
+          const dir = new THREE.Vector3()
+            .subVectors(target.group.position, this.wingmanShip.group.position)
+            .normalize();
+          this.tryFire(this.wingmanShip, dir);
+        }
+      }
+    }
+
+    this.wingmanState.targetId = ai.targetId;
   }
 
   private buildLegacySnapshot(grade: { letter: string }): RunSnapshot {
