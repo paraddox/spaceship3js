@@ -172,6 +172,21 @@ import {
   OVERDRIVE_CHARGE_PER_KILL,
   type OverdriveState,
 } from '../game/overdrive';
+import {
+  type LegacyState,
+  type RunSnapshot,
+  loadLegacyState,
+  persistLegacyState,
+  finalizeRun,
+  computeLegacyXp,
+  getLegacySummary,
+  getActiveBonusEffects,
+  getStartingBonusDef,
+  STARTING_BONUSES,
+  MILESTONES,
+  DEFAULT_LEGACY_STATE,
+  MAX_ACTIVE_BONUSES,
+} from '../game/legacy';
 
 const REPAIR_HP_FRACTION = 0.75;
 
@@ -336,6 +351,11 @@ export class FlightScene {
   private pickupAnnouncement = '';
   private pickupAnnouncementTimer = 0;
 
+  // Legacy Codex (persistent cross-run progression)
+  private legacyState: LegacyState = { ...DEFAULT_LEGACY_STATE };
+  private legacyFinalized = false;
+  private legacyNewMilestones: typeof MILESTONES = [];
+
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
     this.keys.add(event.code);
@@ -373,6 +393,11 @@ export class FlightScene {
     this.camera.up.set(0, 0, -1);
     this.camera.lookAt(0, 0, 0);
     this.scene.background = new THREE.Color('#020617');
+
+    // Load legacy state for endless mode
+    if (this.isEndlessMode) {
+      this.legacyState = loadLegacyState();
+    }
 
     const ambient = new THREE.AmbientLight(0xffffff, 1.2);
     const rim = new THREE.DirectionalLight(0xbfe1ff, 1.1);
@@ -658,9 +683,16 @@ export class FlightScene {
     this.comboState = createComboState();
     this.overdriveState = createOverdriveState();
     this.shopWaveCleared = 0;
+    this.legacyFinalized = false;
+    this.legacyNewMilestones = [];
     this.waveAnnouncement = `${this.currentWave > 0 ? `Wave ${this.currentWave}` : 'Wave 1'} incoming...`;
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
+
+    // Apply legacy starting bonuses in endless mode
+    if (this.isEndlessMode) {
+      this.applyLegacyBonuses();
+    }
     this.spawnDronesForShip(this.player);
     if (this.encounterObjective.type === 'protect_ally') {
       const preset = getEncounterPreset(this.encounterId);
@@ -3024,6 +3056,87 @@ export class FlightScene {
       <span class="ability-icon">${phase === 'active' ? '⚡' : '🔮'}</span>
       ${fillHtml}
     </div>`;
+  }
+
+  // ── Legacy Codex Methods ──────────────────────────────────
+
+  private applyLegacyBonuses(): void {
+    const effects = getActiveBonusEffects(this.legacyState);
+    for (const effect of effects) {
+      switch (effect.kind) {
+        case 'bonus_hp': {
+          const bonus = Math.round(this.player.stats.maxHp * (effect.value / 100));
+          this.player.hp += bonus;
+          this.player.stats.maxHp += bonus;
+          for (const mod of this.player.moduleStates) {
+            if (!mod.destroyed) mod.maxHp += bonus / Math.max(1, this.player.moduleStates.filter((m) => !m.destroyed).length);
+          }
+          break;
+        }
+        case 'bonus_credits':
+          this.endlessCredits += effect.value;
+          break;
+        case 'bonus_shield':
+          if (this.player.maxShield > 0) {
+            this.player.shield += effect.value;
+            this.player.maxShield += effect.value;
+          } else {
+            this.player.shield = effect.value;
+            this.player.maxShield = effect.value;
+          }
+          break;
+        case 'heat_capacity':
+          this.player.stats.heatCapacity *= (1 + effect.value / 100);
+          break;
+        case 'dash_cd_reduction':
+          this.upgradeStats.dashCooldownReduction += effect.value / 100;
+          break;
+        case 'combo_window':
+          this.comboState.timer += effect.value;
+          break;
+        case 'ability_cd_reduction':
+          // Reduce all ability cooldowns by the fraction
+          for (const ability of this.player.abilities) {
+            ability.cooldownRemaining *= (1 - effect.value / 100);
+          }
+          break;
+      }
+    }
+  }
+
+  private finalizeLegacyRun(snapshot: RunSnapshot): void {
+    if (this.legacyFinalized || !this.isEndlessMode) return;
+    this.legacyFinalized = true;
+
+    const { updated, newMilestones } = finalizeRun(this.legacyState, snapshot);
+    this.legacyState = updated;
+    this.legacyNewMilestones = newMilestones;
+    persistLegacyState(updated);
+  }
+
+  private buildLegacySnapshot(grade: { letter: string }): RunSnapshot {
+    return {
+      waveReached: this.endlessBestWave || (this.currentWave - 1),
+      totalKills: this.endlessTotalKills,
+      eliteKills: this.runStats.eliteKills,
+      bossKills: this.runStats.bossKills,
+      score: this.endlessScore,
+      creditsEarned: this.endlessCredits,
+      timeSeconds: this.elapsedEncounterSeconds,
+      bestCombo: this.runStats.bestCombo,
+      highestComboTier: this.runStats.highestComboTier,
+      damageDealt: this.runStats.damageDealt,
+      damageTaken: this.runStats.damageTaken,
+      pickupsCollected: this.runStats.pickupsCollected,
+      hpRemaining: Math.max(0, this.player.hp),
+      maxHp: this.player.stats.maxHp,
+      mutatorsChosen: this.runStats.mutatorsChosen,
+      upgradesPurchased: this.runStats.upgradesPurchased,
+      overdriveActivations: this.runStats.overdriveActivations,
+      dashCount: this.runStats.dashCount,
+      abilityActivations: this.runStats.abilityActivations,
+      grade: grade.letter,
+    };
   }
 }
 
