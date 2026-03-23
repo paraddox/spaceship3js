@@ -101,6 +101,23 @@ import {
   type LiveUpgradeStats,
 } from '../game/upgrade-shop';
 import {
+  type MutatorDef,
+  type ActiveMutator,
+  type MutatorId,
+  MUTATOR_CATALOG,
+  MAX_MUTATORS,
+  hasMutator,
+  canAddMutator,
+  getShopMutators,
+  applyMutatorStatMods,
+  momentumDamageMult,
+  vampiricHeal,
+  thornsReflectFraction,
+  lastStandBonuses,
+  bountyHunterActive,
+  chainReactionActive,
+} from '../game/mutators';
+import {
   createDashState,
   canDash,
   startDash,
@@ -276,6 +293,10 @@ export class FlightScene {
   private shopOpen = false;
   private shopOptions: UpgradeDef[] = [];
   private shopWaveCleared = 0;
+
+  // Mutator traits
+  private activeMutators: ActiveMutator[] = [];
+  private shopMutatorOptions: MutatorDef[] = [];
   /** Timed announcement shown in HUD for elite enemy spawns. */
   private eliteAnnouncement = '';
   /** Timer to fade out elite announcement (seconds remaining). */
@@ -617,6 +638,8 @@ export class FlightScene {
     this.purchasedUpgrades = [];
     this.shopOpen = false;
     this.shopOptions = [];
+    this.activeMutators = [];
+    this.shopMutatorOptions = [];
     this.dashState = createDashState();
     this.comboState = createComboState();
     this.overdriveState = createOverdriveState();
@@ -988,7 +1011,9 @@ export class FlightScene {
     if (!weapon) return;
     ship.weaponIndex = (ship.weaponIndex + 1) % ship.weapons.length;
 
-    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier * getOverdriveFireRateMult(this.overdriveState) : (ship.affixFireRateMult ?? 1);
+    // Mutator: Last Stand fire rate boost
+    const lastStand = ship.team === 'player' ? lastStandBonuses(this.activeMutators, this.player.hp / Math.max(1, this.player.stats.maxHp)) : { damageMult: 1, fireRateMult: 1 };
+    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier * getOverdriveFireRateMult(this.overdriveState) * lastStand.fireRateMult : (ship.affixFireRateMult ?? 1);
     const effectiveCadence = getEffectiveWeaponCadence(
       Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
       ship.powerFactor,
@@ -998,7 +1023,8 @@ export class FlightScene {
     if (effectiveCadence <= 0.05) return;
 
     const normalizedDirection = direction.clone().normalize();
-    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier * getOverdriveDamageMult(this.overdriveState) : (ship.affixDamageMult ?? 1);
+    const momentumMult = ship.team === 'player' ? momentumDamageMult(this.activeMutators, ship.velocity.length()) : 1;
+    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier * getOverdriveDamageMult(this.overdriveState) * lastStand.damageMult * momentumMult : (ship.affixDamageMult ?? 1);
     const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier);
 
     if (weapon.archetype === 'beam') {
@@ -1298,10 +1324,24 @@ export class FlightScene {
         this.endlessTotalKills += 1;
         // Elite credit bonus
         const killedAffixes = this.shipAffixes.get(ship.id);
+        const killedIsElite = killedAffixes && killedAffixes.length >= 2;
         if (killedAffixes && killedAffixes.length > 0) {
           this.endlessWaveEliteBonus += Math.floor(10 * eliteCreditsMultiplier(killedAffixes));
         }
         this.shipAffixes.delete(ship.id);
+        // Mutator: Vampiric heal
+        const heal = vampiricHeal(this.activeMutators, this.player.stats.maxHp);
+        if (heal > 0 && this.player.alive) {
+          this.player.hp = Math.min(this.player.stats.maxHp, this.player.hp + heal);
+        }
+        // Mutator: Bounty Hunter — refresh ability cooldowns on elite kill
+        if (killedIsElite && bountyHunterActive(this.activeMutators)) {
+          for (const ability of this.player.abilities) {
+            if (ability.cooldownRemaining > 0) ability.cooldownRemaining = 0;
+          }
+          this.eliteAnnouncement = '🎯 Bounty Hunter — abilities refreshed!';
+          this.eliteAnnouncementTimer = 2;
+        }
         // Combo system
         const result = registerComboKill(this.comboState);
         this.comboState = result.state;
@@ -1976,17 +2016,36 @@ export class FlightScene {
         </div>`;
       }).join('');
 
+      const mutatorCards = this.shopMutatorOptions.map((m, i) => {
+        const conflicts = m.conflictsWith?.filter((cid) => hasMutator(this.activeMutators, cid as MutatorId)) ?? [];
+        return `<div class="upgrade-card" style="border-color:#c084fc;background:rgba(192,132,252,0.06)">
+          <div style="font-size:0.7em;color:#c084fc;margin-bottom:2px">⚠ TRAIT — Free</div>
+          <div style="font-size:1.3em">${m.icon}</div>
+          <strong style="color:#c084fc">${m.displayName}</strong>
+          <p style="margin:4px 0">${m.description}</p>
+          <small style="color:#94a3b8;font-style:italic">${m.flavor}</small>
+          ${conflicts.length > 0 ? `<p style="color:#f87171;font-size:0.8em;margin-top:4px">⚠ Conflicts with active trait</p>` : ''}
+          <button class="primary" data-mutator="${i}" ${conflicts.length > 0 ? 'disabled' : ''} style="font-size:0.85em;background:#7c3aed;border-color:#7c3aed">
+            ${conflicts.length > 0 ? 'Unavailable' : 'Take Trait'}
+          </button>
+        </div>`;
+      }).join('');
+
+      const mutatorSlots = `Mutators: ${this.activeMutators.length}/${MAX_MUTATORS}`;
+
       hud.innerHTML = `
         <div style="text-align:center;margin-bottom:8px">
           <strong style="font-size:1.1em;color:#e2e8f0">⚡ Upgrade Shop — Wave ${this.shopWaveCleared} Cleared</strong>
           ${restRepair ? '<p class="success">🔧 Rest stop: hull partially repaired!</p>' : ''}
         </div>
-        <div class="upgrade-grid">${upgradeCards}</div>
+        ${mutatorCards ? `<div style="text-align:center;margin-bottom:6px"><span style="color:#c084fc;font-size:0.85em;font-weight:600">— Offered Trait —</span></div><div class="upgrade-grid">${mutatorCards}</div>` : ''}
+        ${mutatorCards && upgradeCards.length > 0 ? '<div style="text-align:center;margin:8px 0"><span style="color:#64748b">— or —</span></div>' : ''}
+        ${upgradeCards.length > 0 ? `<div class="upgrade-grid">${upgradeCards}</div>` : '<p class="muted" style="text-align:center">No upgrades available</p>'}
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
           <span style="color:#fbbf24">💰 ${this.endlessCredits} credits</span>
           <button data-action="skip-upgrade" style="font-size:0.85em">Skip →</button>
         </div>
-        <p class="muted" style="margin-top:6px">Upgrades: ${this.purchasedUpgrades.length} purchased · Score: ${this.endlessScore.toLocaleString()}</p>
+        <p class="muted" style="margin-top:6px">Upgrades: ${this.purchasedUpgrades.length} · ${mutatorSlots} · Score: ${this.endlessScore.toLocaleString()}</p>
       `;
 
       // Bind upgrade card buttons
@@ -1998,6 +2057,13 @@ export class FlightScene {
       });
       hud.querySelector('[data-action="skip-upgrade"]')?.addEventListener('click', () => {
         this.closeUpgradeShop();
+      });
+      // Bind mutator trait buttons
+      hud.querySelectorAll('[data-mutator]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt((btn as HTMLElement).dataset.mutator ?? '0', 10);
+          if (this.shopMutatorOptions[idx]) this.purchaseMutator(this.shopMutatorOptions[idx]);
+        });
       });
       return;
     }
@@ -2060,6 +2126,7 @@ export class FlightScene {
       ${this.eliteAnnouncement ? `<p style=\"font-size:1em;color:#fbbf24;font-weight:600;text-shadow:0 0 6px rgba(251,191,36,0.5)\">${this.eliteAnnouncement}</p>` : ''}
       ${isOverdriveActive(this.overdriveState) ? `<div class=\"overdrive-vignette\" style=\"opacity:${0.3 + 0.2 * Math.sin(this.elapsedEncounterSeconds * 8)}\"></div>` : ''}
       ${this.playerBuffs.length > 0 ? `<div class="ability-bar">${this.playerBuffs.map((b) => `<div class="ability-slot active" title="${b.kind === 'power_surge' ? 'Power Surge' : 'Rapid Fire'} — ${b.remaining.toFixed(1)}s"><span class="ability-icon">${b.kind === 'power_surge' ? '⚡' : '🔥'}</span><span class="ability-fill active-fill" style="width:${(b.remaining / b.duration) * 100}%"></span></div>`).join('')}</div>` : ''}
+      ${this.activeMutators.length > 0 ? `<div class="ability-bar" style="justify-content:center;gap:6px">${this.activeMutators.map((m) => `<div class="ability-slot active" title="${m.def.displayName}: ${m.def.description}" style="border-color:#c084fc"><span class="ability-icon">${m.def.icon}</span></div>`).join('')}</div>` : ''}
       ${!this.player.alive
         ? this.isEndlessMode
           ? `<p class="warning">Ship disabled · Wave ${this.currentWave} · ${this.endlessTotalKills} kills · Score: ${this.endlessScore.toLocaleString()}</p>`
@@ -2368,10 +2435,24 @@ export class FlightScene {
             if (this.isEndlessMode && ship.team === 'enemy') {
               this.endlessTotalKills += 1;
               const killedAffixes = this.shipAffixes.get(ship.id);
+              const killedIsElite = killedAffixes && killedAffixes.length >= 2;
               if (killedAffixes && killedAffixes.length > 0) {
                 this.endlessWaveEliteBonus += Math.floor(10 * eliteCreditsMultiplier(killedAffixes));
               }
               this.shipAffixes.delete(ship.id);
+              // Mutator: Vampiric heal
+              const heal2 = vampiricHeal(this.activeMutators, this.player.stats.maxHp);
+              if (heal2 > 0 && this.player.alive) {
+                this.player.hp = Math.min(this.player.stats.maxHp, this.player.hp + heal2);
+              }
+              // Mutator: Bounty Hunter
+              if (killedIsElite && bountyHunterActive(this.activeMutators)) {
+                for (const ability of this.player.abilities) {
+                  if (ability.cooldownRemaining > 0) ability.cooldownRemaining = 0;
+                }
+                this.eliteAnnouncement = '🎯 Bounty Hunter — abilities refreshed!';
+                this.eliteAnnouncementTimer = 2;
+              }
               const comboResult = registerComboKill(this.comboState);
               this.comboState = comboResult.state;
               const comboMult2 = getComboTier(this.comboState.kills).multiplier;
@@ -2672,6 +2753,7 @@ export class FlightScene {
   private openUpgradeShop(waveCleared: number): void {
     this.shopWaveCleared = waveCleared;
     this.shopOptions = generateUpgradeOptions(waveCleared, this.purchasedUpgrades);
+    this.shopMutatorOptions = this.generateMutatorOptions(waveCleared);
 
     // Free hull repair every 5 waves
     if (waveCleared > 0 && waveCleared % 5 === 0) {
@@ -2699,9 +2781,40 @@ export class FlightScene {
   private closeUpgradeShop(): void {
     this.shopOpen = false;
     this.shopOptions = [];
+    this.shopMutatorOptions = [];
     // Resume wave spawn — the wave delay handles the timing
     this.waveDelay = 0.5; // Brief delay before next wave spawns
     this.waveAnnouncement = `Wave ${this.currentWave} incoming...`;
+  }
+
+  /** Generate 1 mutator option for the shop (free, replaces one upgrade slot if available). */
+  private generateMutatorOptions(waveNumber: number): MutatorDef[] {
+    const available = getShopMutators(waveNumber, this.activeMutators);
+    if (available.length === 0) return [];
+    // Offer at most 1 mutator per shop visit, weighted random
+    const weights = available.map((m) => {
+      let w = 1;
+      if (m.waveMin >= 7) w = 0.6;
+      if (m.waveMin >= 9) w = 0.4;
+      return { def: m, weight: w };
+    });
+    const totalW = weights.reduce((s, w) => s + w.weight, 0);
+    let roll = Math.random() * totalW;
+    for (const entry of weights) {
+      roll -= entry.weight;
+      if (roll <= 0) return [entry.def];
+    }
+    return [weights[0].def];
+  }
+
+  /** Take a mutator (free — mutators are always offered at no cost). */
+  private purchaseMutator(mutator: MutatorDef): void {
+    if (!canAddMutator(this.activeMutators, mutator)) return;
+    this.activeMutators.push({ def: mutator, acquiredWave: this.shopWaveCleared });
+    // Apply stat modifications immediately
+    this.upgradeStats = applyMutatorStatMods(this.upgradeStats, this.activeMutators);
+    this.rebuildPlayerWithUpgrades();
+    this.shopMutatorOptions = []; // Remove mutator option after picking
   }
 
   /**
