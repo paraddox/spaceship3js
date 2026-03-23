@@ -138,6 +138,39 @@ import {
   type DashState,
 } from '../game/dash';
 import {
+  CREW_ORDER_DEFS,
+  activateEngineerReroute,
+  activateGunnerFocus,
+  activatePilotSurge,
+  activateTacticianLink,
+  canActivateCrewOrder,
+  clearCrewOrderTarget,
+  createCrewOrdersState,
+  getActiveRemaining,
+  getCooldownRemaining,
+  getCrewOrderCooldown,
+  getCrewOrderDef,
+  getCrewOrderDuration,
+  getCrewOrderTargetId,
+  getCrewOrderTargetLabel,
+  getEngineerCoolingMultiplier,
+  getEngineerHeatVentFraction,
+  getEngineerRepairFraction,
+  getEngineerShieldBurst,
+  getEngineerShieldRechargeMultiplier,
+  getGunnerCadenceMultiplier,
+  getGunnerFocusDamageMultiplier,
+  getPilotThrustMultiplier,
+  getPilotTurnMultiplier,
+  getTacticianCadenceMultiplier,
+  getTacticianComboDecayMultiplier,
+  getTacticianDroneDamageMultiplier,
+  isOrderActive,
+  tickCrewOrders,
+  type CrewOrderId,
+  type CrewOrdersState,
+} from '../game/crew-orders';
+import {
   createComboState,
   registerComboKill,
   tickCombo,
@@ -372,6 +405,8 @@ interface Projectile {
   armorPenetration: number;
   turnRate: number;
   target: RuntimeShip | null;
+  focusTargetId?: string;
+  focusDamageMult?: number;
   active: boolean;
 }
 
@@ -492,6 +527,9 @@ export class FlightScene {
   private dashState: DashState = createDashState();
   private comboState: ComboState = createComboState();
   private overdriveState: OverdriveState = createOverdriveState();
+  private crewOrdersState: CrewOrdersState = createCrewOrdersState();
+  private crewOrderAnnouncement = '';
+  private crewOrderAnnouncementTimer = 0;
   private pickupAnnouncement = '';
   private pickupAnnouncementTimer = 0;
 
@@ -607,6 +645,7 @@ export class FlightScene {
     this.updateCameraFollow(dt);
     this.updateWaveDelay(dt);
     this.updateOverdrive(dt);
+    this.updateCrewOrders(dt);
     const enemyDt = dt * getOverdriveTimeScale(this.overdriveState);
     this.updatePlayer(dt);
     this.updateProtectedAllies(enemyDt);
@@ -657,6 +696,10 @@ export class FlightScene {
     if (this.mutagenAnnouncementTimer > 0) {
       this.mutagenAnnouncementTimer -= dt;
       if (this.mutagenAnnouncementTimer <= 0) this.mutagenAnnouncement = '';
+    }
+    if (this.crewOrderAnnouncementTimer > 0) {
+      this.crewOrderAnnouncementTimer -= dt;
+      if (this.crewOrderAnnouncementTimer <= 0) this.crewOrderAnnouncement = '';
     }
     if (this.contractAnnouncementTimer > 0) {
       this.contractAnnouncementTimer -= dt;
@@ -748,6 +791,7 @@ export class FlightScene {
           <li>V: overdrive (when charged)</li>
           <li>1: Shield Boost · 2: Afterburner</li>
           <li>3: Overcharge · 4: Emergency Repair</li>
+          <li>Z/X/C/B: Crew Orders</li>
         </ul>
       </div>
     `;
@@ -915,6 +959,10 @@ export class FlightScene {
     this.dashState = createDashState();
     this.comboState = createComboState();
     this.overdriveState = createOverdriveState();
+    this.crewOrdersState = createCrewOrdersState();
+    this.crewOrderAnnouncement = '';
+    this.crewOrderAnnouncementTimer = 0;
+    this.clearCrewOrderMarkers();
     this.shopWaveCleared = 0;
     this.legacyFinalized = false;
     this.legacyNewMilestones = [];
@@ -1137,7 +1185,11 @@ export class FlightScene {
       this.mouseWorld.x - this.player.position.x,
       this.mouseWorld.z - this.player.position.z,
     );
-    this.player.rotation = lerpAngle(this.player.rotation, desiredRotation, Math.min(1, dt * 8));
+    this.player.rotation = lerpAngle(
+      this.player.rotation,
+      desiredRotation,
+      Math.min(1, dt * 8 * getPilotTurnMultiplier(this.crewOrdersState, this.player.blueprint.crew)),
+    );
 
     const forward = new THREE.Vector3(Math.sin(this.player.rotation), 0, Math.cos(this.player.rotation));
     const right = new THREE.Vector3(Math.cos(this.player.rotation), 0, -Math.sin(this.player.rotation));
@@ -1145,7 +1197,7 @@ export class FlightScene {
     const strafeInput = Number(this.keys.has('KeyD')) - Number(this.keys.has('KeyA'));
     const crisisThrustMult = getPlayerThrustMult(this.crisisState.activeEffects);
     const effectiveThrust = getEffectiveThrust(
-      Math.max(4, this.player.stats.thrust / 70 * crisisThrustMult),
+      Math.max(4, this.player.stats.thrust / 70 * crisisThrustMult * getPilotThrustMultiplier(this.crewOrdersState, this.player.blueprint.crew)),
       this.player.powerFactor,
       this.player.heat,
       this.player.stats.heatCapacity,
@@ -1175,6 +1227,12 @@ export class FlightScene {
     this.tryPlayerAbility('Digit2', 'afterburner');
     this.tryPlayerAbility('Digit3', 'overcharge');
     this.tryPlayerAbility('Digit4', 'emergency_repair');
+
+    // ── Crew Orders ──
+    this.tryCrewOrder('pilot_surge');
+    this.tryCrewOrder('gunner_focus');
+    this.tryCrewOrder('engineer_reroute');
+    this.tryCrewOrder('tactician_link');
 
     // ── Dash (Space) ──
     this.dashState = updateDash(this.dashState, dt);
@@ -1208,6 +1266,7 @@ export class FlightScene {
   private tryPlayerAbility(keyCode: string, abilityId: AbilityId): void {
     if (!this.keys.has(keyCode)) return;
     if (activateAbility(this.player.abilities, abilityId)) {
+      this.runStats.abilityActivations += 1;
       // Handle emergency repair immediately
       if (abilityId === 'emergency_repair') {
         const target = getRepairTarget(this.player.moduleStates);
@@ -1221,6 +1280,83 @@ export class FlightScene {
         }
       }
     }
+  }
+
+  private tryCrewOrder(id: CrewOrderId): void {
+    const def = getCrewOrderDef(id);
+    const keyCode = `Key${def.hotkey}`;
+    const crew = this.player.blueprint.crew;
+    if (!this.keys.has(keyCode) || !canActivateCrewOrder(this.crewOrdersState, id, crew)) return;
+
+    if (id === 'pilot_surge') {
+      this.crewOrdersState = activatePilotSurge(this.crewOrdersState, crew);
+      this.dashState = { ...this.dashState, cooldownRemaining: 0 };
+      this.crewOrderAnnouncement = `${def.icon} ${def.displayName} — helm surge online`;
+      this.crewOrderAnnouncementTimer = 2.4;
+      this.particles.emit(ParticleSystem.dashBurst(this.player.position));
+      this.runStats.abilityActivations += 1;
+      return;
+    }
+
+    if (id === 'gunner_focus') {
+      const target = this.getCrewOrderTargetCandidate();
+      if (!target) return;
+      this.crewOrdersState = activateGunnerFocus(this.crewOrdersState, crew, target.id, target.blueprint.name);
+      this.crewOrderAnnouncement = `${def.icon} ${def.displayName} — ${target.blueprint.name} designated`;
+      this.crewOrderAnnouncementTimer = 2.8;
+      this.particles.emit(ParticleSystem.comboBurst(target.position, def.color));
+      this.runStats.abilityActivations += 1;
+      return;
+    }
+
+    if (id === 'engineer_reroute') {
+      this.crewOrdersState = activateEngineerReroute(this.crewOrdersState, crew);
+      const ventFraction = getEngineerHeatVentFraction(crew);
+      this.player.heat = Math.max(0, this.player.heat - this.player.stats.heatCapacity * ventFraction);
+      if (this.player.maxShield > 0) {
+        this.player.shield = Math.min(this.player.maxShield, this.player.shield + getEngineerShieldBurst(crew));
+      }
+      const target = getRepairTarget(this.player.moduleStates);
+      if (target) {
+        const repairAmount = target.maxHp * getEngineerRepairFraction(crew);
+        target.currentHp = Math.min(target.maxHp, target.currentHp + repairAmount);
+        this.player.hp = this.player.moduleStates.filter((m) => !m.destroyed).reduce((sum, m) => sum + m.currentHp, 0);
+        this.restoreModuleMesh(this.player, target.instanceId);
+      }
+      this.crewOrderAnnouncement = `${def.icon} ${def.displayName} — heat vented and shields rerouted`;
+      this.crewOrderAnnouncementTimer = 2.8;
+      this.particles.emit(ParticleSystem.shieldAbsorb(this.player.position, def.color));
+      this.runStats.abilityActivations += 1;
+      return;
+    }
+
+    const target = this.getCrewOrderTargetCandidate();
+    if (!target) return;
+    const preferredTargetId = getCrewOrderTargetId(this.crewOrdersState) ?? target.id;
+    const preferredTarget = this.ships.find((ship) => ship.id === preferredTargetId && ship.alive) ?? target;
+    this.crewOrdersState = activateTacticianLink(this.crewOrdersState, crew, preferredTarget.id, preferredTarget.blueprint.name);
+    this.crewOrderAnnouncement = `${def.icon} ${def.displayName} — network locked on ${preferredTarget.blueprint.name}`;
+    this.crewOrderAnnouncementTimer = 2.8;
+    this.particles.emit(ParticleSystem.comboBurst(this.player.position, def.color));
+    this.runStats.abilityActivations += 1;
+  }
+
+  private getCrewOrderTargetCandidate(): RuntimeShip | null {
+    const livingEnemies = this.ships.filter((ship) => ship.team === 'enemy' && ship.alive);
+    if (livingEnemies.length === 0) return null;
+
+    let best = livingEnemies[0];
+    let bestScore = -Infinity;
+    for (const enemy of livingEnemies) {
+      const mouseDistance = enemy.position.distanceTo(this.mouseWorld);
+      const playerDistance = enemy.position.distanceTo(this.player.position);
+      const score = 60 - mouseDistance * 8 - playerDistance + (enemy.isBoss ? 50 : 0) + ((this.shipAffixes.get(enemy.id)?.length ?? 0) * 12);
+      if (score > bestScore) {
+        best = enemy;
+        bestScore = score;
+      }
+    }
+    return best;
   }
 
   private restoreModuleMesh(ship: RuntimeShip, instanceId: string): void {
@@ -1372,9 +1508,20 @@ export class FlightScene {
     ship.weaponIndex = (ship.weaponIndex + 1) % ship.weapons.length;
 
     // Mutator: Last Stand fire rate boost
+    const playerCrew = this.player.blueprint.crew;
+    const focusTargetId = ship.team === 'player' ? getCrewOrderTargetId(this.crewOrdersState) : null;
     const lastStand = ship.team === 'player' ? lastStandBonuses(this.activeMutators, this.player.hp / Math.max(1, this.player.stats.maxHp)) : { damageMult: 1, fireRateMult: 1 };
     const crisisFireRate = this.crisisEliteKillBuffTimer > 0 ? getEliteKillFireRateBuff(this.crisisState.activeEffects) : 1;
-    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier * getOverdriveFireRateMult(this.overdriveState) * lastStand.fireRateMult * this.mutagenStats.fireRateMultiplier * crisisFireRate : (ship.affixFireRateMult ?? 1);
+    const cadenceBuff = ship.team === 'player'
+      ? getCadenceMultiplier(this.playerBuffs)
+        * this.upgradeStats.fireRateMultiplier
+        * getOverdriveFireRateMult(this.overdriveState)
+        * lastStand.fireRateMult
+        * this.mutagenStats.fireRateMultiplier
+        * crisisFireRate
+        * getGunnerCadenceMultiplier(this.crewOrdersState, playerCrew)
+        * getTacticianCadenceMultiplier(this.crewOrdersState, playerCrew)
+      : (ship.affixFireRateMult ?? 1);
     const effectiveCadence = getEffectiveWeaponCadence(
       Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
       ship.powerFactor,
@@ -1386,11 +1533,22 @@ export class FlightScene {
     const normalizedDirection = direction.clone().normalize();
     const momentumMult = ship.team === 'player' ? momentumDamageMult(this.activeMutators, ship.velocity.length()) : 1;
     const crisisDamage = this.crisisEliteKillBuffTimer > 0 ? getEliteKillDamageBuff(this.crisisState.activeEffects) : 1;
-    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier * getOverdriveDamageMult(this.overdriveState) * lastStand.damageMult * momentumMult * this.mutagenStats.damageMultiplier * crisisDamage : (ship.affixDamageMult ?? 1);
+    const buffMultiplier = ship.team === 'player'
+      ? getDamageMultiplier(this.playerBuffs)
+        * this.upgradeStats.damageMultiplier
+        * getOverdriveDamageMult(this.overdriveState)
+        * lastStand.damageMult
+        * momentumMult
+        * this.mutagenStats.damageMultiplier
+        * crisisDamage
+      : (ship.affixDamageMult ?? 1);
+    const focusDamageMult = ship.team === 'player'
+      ? getGunnerFocusDamageMultiplier(this.crewOrdersState, playerCrew, focusTargetId)
+      : 1;
     const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier);
 
     if (weapon.archetype === 'beam') {
-      this.fireBeam(ship, normalizedDirection, weapon, damage);
+      this.fireBeam(ship, normalizedDirection, weapon, damage, focusTargetId, focusDamageMult);
       playBeam();
       ship.cooldown = weapon.cooldown;
       ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + weapon.heat);
@@ -1414,6 +1572,8 @@ export class FlightScene {
     projectile.ttl = weapon.archetype === 'missile' ? 3.8 : 2.2;
     projectile.turnRate = weapon.archetype === 'missile' ? 2.8 : 0;
     projectile.target = weapon.archetype === 'missile' ? this.findNearestEnemy(ship) : null;
+    projectile.focusTargetId = focusTargetId ?? undefined;
+    projectile.focusDamageMult = focusTargetId ? focusDamageMult : undefined;
     const crisisEnemyProjMult = getEnemyProjectileSpeedMult(this.crisisState.activeEffects);
     projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(
       (weapon.projectileSpeed + (ship.team === 'player' ? this.upgradeStats.projectileSpeedBonus : 0))
@@ -1496,7 +1656,10 @@ export class FlightScene {
             projectile.mesh.position.x - ship.position.x,
             projectile.mesh.position.z - ship.position.z,
           );
-          this.applyDamage(ship, projectile.damage, projectile.damageType, projectile.armorPenetration, hitAngle);
+          const impactDamage = projectile.focusTargetId && ship.id === projectile.focusTargetId
+            ? projectile.damage * (projectile.focusDamageMult ?? 1)
+            : projectile.damage;
+          this.applyDamage(ship, impactDamage, projectile.damageType, projectile.armorPenetration, hitAngle);
           this.deactivateProjectile(projectile);
           break;
         }
@@ -1535,7 +1698,9 @@ export class FlightScene {
 
       drone.mesh.visible = true;
       drone.mesh.position.set(drone.state.x, 0.35, drone.state.z);
-      const target = chooseDroneTarget(drone.state, targets);
+      const forcedTargetId = owner.team === 'player' ? getCrewOrderTargetId(this.crewOrdersState) : null;
+      const forcedTarget = forcedTargetId ? targets.find((target) => target.id === forcedTargetId && target.alive) ?? null : null;
+      const target = forcedTarget ?? chooseDroneTarget(drone.state, targets);
       if (target && drone.state.cooldown <= 0) {
         const victim = this.ships.find((ship) => ship.id === target.id && ship.alive);
         if (victim) {
@@ -1543,7 +1708,12 @@ export class FlightScene {
             this.drones.find((d) => d.ownerId === owner.id)?.state.x ?? 0 - victim.position.x,
             (this.drones.find((d) => d.ownerId === owner.id)?.state.z ?? 0) - victim.position.z,
           );
-          this.applyDamage(victim, drone.state.damage * 0.35, 'energy', 0, hitAngle);
+          const droneDamage = drone.state.damage
+            * 0.35
+            * (owner.team === 'player'
+              ? getTacticianDroneDamageMultiplier(this.crewOrdersState, this.player.blueprint.crew, victim.id)
+              : 1);
+          this.applyDamage(victim, droneDamage, 'energy', 0, hitAngle);
           drone.state.cooldown = 1 / drone.state.fireRate;
           this.waveAnnouncement = `${owner.team === 'player' ? 'Support drones engaging' : 'Enemy drones attacking'}`;
         }
@@ -1570,7 +1740,14 @@ export class FlightScene {
     }
   }
 
-  private fireBeam(ship: RuntimeShip, direction: THREE.Vector3, weapon: WeaponProfile, damage: number): void {
+  private fireBeam(
+    ship: RuntimeShip,
+    direction: THREE.Vector3,
+    weapon: WeaponProfile,
+    damage: number,
+    focusTargetId: string | null,
+    focusDamageMult: number,
+  ): void {
     let bestTarget: RuntimeShip | null = null;
     let bestDistance = Infinity;
     for (const candidate of this.ships) {
@@ -1591,7 +1768,10 @@ export class FlightScene {
         ship.position.x - bestTarget.position.x,
         ship.position.z - bestTarget.position.z,
       );
-      this.applyDamage(bestTarget, damage * 0.85, weapon.damageType as DamageType, weapon.armorPenetration, hitAngle);
+      const beamDamage = focusTargetId && bestTarget.id === focusTargetId
+        ? damage * focusDamageMult
+        : damage;
+      this.applyDamage(bestTarget, beamDamage * 0.85, weapon.damageType as DamageType, weapon.armorPenetration, hitAngle);
       this.spawnBeamVisual(ship.position, bestTarget.position, ship.team);
       this.spawnImpactVisual(bestTarget.position, ship.team === 'player' ? '#5eead4' : '#fca5a5');
       this.waveAnnouncement = `${ship.team === 'player' ? 'Beam strike' : 'Enemy beam'} connected`;
@@ -1933,12 +2113,18 @@ export class FlightScene {
   private coolShips(dt: number): void {
     for (const ship of this.ships) {
       ship.cooldown = Math.max(0, ship.cooldown - dt);
-      const cooling = computeCoolingPerSecond(Math.max(2, ship.stats.cooling * 80), ship.powerFactor);
+      const engineerCooling = ship.team === 'player'
+        ? getEngineerCoolingMultiplier(this.crewOrdersState, this.player.blueprint.crew)
+        : 1;
+      const engineerShieldRecharge = ship.team === 'player'
+        ? getEngineerShieldRechargeMultiplier(this.crewOrdersState, this.player.blueprint.crew)
+        : 1;
+      const cooling = computeCoolingPerSecond(Math.max(2, ship.stats.cooling * 80 * engineerCooling), ship.powerFactor);
       ship.heat = Math.max(0, ship.heat - cooling * dt);
       ship.shield = rechargeShield(
         ship.shield,
         ship.maxShield,
-        ship.stats.shieldRecharge * (isShieldBoosted(ship.abilities) ? 2 : 1),
+        ship.stats.shieldRecharge * (isShieldBoosted(ship.abilities) ? 2 : 1) * engineerShieldRecharge,
         dt,
       );
       // Affix: HP regeneration (5% max HP per second)
@@ -2111,6 +2297,8 @@ export class FlightScene {
     projectile.active = false;
     projectile.mesh.visible = false;
     projectile.ttl = 0;
+    projectile.focusTargetId = undefined;
+    projectile.focusDamageMult = undefined;
   }
 
   private syncShipTransform(ship: RuntimeShip): void {
@@ -2506,6 +2694,19 @@ export class FlightScene {
           ctx.stroke();
         }
 
+        if (getCrewOrderTargetId(this.crewOrdersState) === ship.id) {
+          const color = this.getCrewOrderMarkerColor();
+          const pulse = 0.35 + 0.35 * Math.sin(this.elapsedEncounterSeconds * 7);
+          const cr = parseInt(color.slice(1, 3), 16);
+          const cg = parseInt(color.slice(3, 5), 16);
+          const cb = parseInt(color.slice(5, 7), 16);
+          ctx.strokeStyle = `rgba(${cr}, ${cg}, ${cb}, ${pulse})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(sx, sy, r + 5, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
         if (this.activeContract?.kind === 'priority_target' && this.activeContract.targetShipId === ship.id) {
           const pulse = 0.45 + 0.35 * Math.sin(this.elapsedEncounterSeconds * 7);
           ctx.strokeStyle = `rgba(251, 191, 36, ${pulse})`;
@@ -2804,6 +3005,12 @@ export class FlightScene {
         ${this.renderDashSlot()}
         ${this.isEndlessMode ? this.renderOverdriveSlot() : ''}
       </div>
+      <div class="ability-bar crew-order-bar">
+        ${this.renderCrewOrderSlot('pilot_surge')}
+        ${this.renderCrewOrderSlot('gunner_focus')}
+        ${this.renderCrewOrderSlot('engineer_reroute')}
+        ${this.renderCrewOrderSlot('tactician_link')}
+      </div>
       <p class="muted">Crew ${crewSummary}</p>
       ${this.isEndlessMode && this.comboState.kills >= 2 ? this.renderComboHud() : ''}
       ${this.activeContract ? `<div class="contract-status-box" style="border-color:${this.activeContract.color};background:rgba(${parseInt(this.activeContract.color.slice(1,3),16)},${parseInt(this.activeContract.color.slice(3,5),16)},${parseInt(this.activeContract.color.slice(5,7),16)},0.08)"><div style="display:flex;justify-content:space-between;align-items:center"><strong style="color:${this.activeContract.color}">${this.activeContract.icon} ${this.activeContract.displayName}</strong><span style="color:${this.activeContract.color};font-size:0.78em">${this.renderContractReward(this.activeContract)}</span></div><div style="margin-top:4px;color:#e2e8f0">${getContractProgressLabel(this.activeContract)}</div></div>` : ''}
@@ -2820,6 +3027,7 @@ export class FlightScene {
       ${this.bossWarning ? `<p style=\"font-size:1em;color:#f97316;font-weight:600;text-shadow:0 0 6px rgba(249,115,22,0.5)\">${this.bossWarning}</p>` : ''}
       ${this.salvageAnnouncement ? `<p style=\"font-size:1.05em;color:#c084fc;font-weight:600;text-shadow:0 0 8px rgba(192,132,252,0.5)\">${this.salvageAnnouncement}</p>` : ''}
       ${this.mutagenAnnouncement ? `<div style="color:#34d399;font-size:0.9em;text-align:center;text-shadow:0 0 8px #34d399">${this.mutagenAnnouncement}</div>` : ''}
+      ${this.crewOrderAnnouncement ? `<div style="color:#93c5fd;font-size:0.92em;text-align:center;text-shadow:0 0 8px rgba(147,197,253,0.55)">${this.crewOrderAnnouncement}</div>` : ''}
       ${this.contractAnnouncement ? `<div style="color:#fbbf24;font-size:0.92em;text-align:center;text-shadow:0 0 8px rgba(251,191,36,0.55)">${this.contractAnnouncement}</div>` : ''}
       ${this.bossShip && this.bossShip.alive ? (() => {
         const bHp = Math.max(0, this.bossShip.hp);
@@ -3492,7 +3700,12 @@ export class FlightScene {
 
   private updateCombo(dt: number): void {
     if (!this.isEndlessMode) return;
-    this.comboState = tickCombo(this.comboState, dt * getComboTimerDecayMult(this.crisisState.activeEffects));
+    this.comboState = tickCombo(
+      this.comboState,
+      dt
+        * getComboTimerDecayMult(this.crisisState.activeEffects)
+        * getTacticianComboDecayMultiplier(this.crewOrdersState, this.player.blueprint.crew),
+    );
   }
 
   private updateOverdrive(dt: number): void {
@@ -4119,6 +4332,34 @@ export class FlightScene {
     </div>`;
   }
 
+  private renderCrewOrderSlot(id: CrewOrderId): string {
+    const def = getCrewOrderDef(id);
+    const crewPoints = this.player.blueprint.crew[def.role];
+    const available = crewPoints > 0;
+    const activeRemaining = getActiveRemaining(this.crewOrdersState, id);
+    const cooldownRemaining = getCooldownRemaining(this.crewOrdersState, id);
+    const duration = getCrewOrderDuration(id, this.player.blueprint.crew);
+    const cooldown = getCrewOrderCooldown(id, this.player.blueprint.crew);
+    let stateClass = 'ready';
+    let fillHtml = '';
+
+    if (!available) {
+      stateClass = 'unavailable';
+    } else if (activeRemaining > 0) {
+      stateClass = 'active';
+      fillHtml = `<span class="ability-fill active-fill" style="width:${(activeRemaining / duration) * 100}%"></span>`;
+    } else if (cooldownRemaining > 0) {
+      stateClass = 'cooldown';
+      fillHtml = `<span class="ability-fill cooldown-fill" style="width:${(1 - cooldownRemaining / cooldown) * 100}%"></span>`;
+    }
+
+    return `<div class="ability-slot ${stateClass}" title="${def.displayName} [${def.hotkey}] — ${def.description}${available ? ` · crew ${crewPoints}` : ' · assign crew to unlock'}" style="border-color:${available ? `${def.color}55` : 'rgba(148,163,184,0.18)'};${stateClass === 'active' ? `box-shadow:0 0 12px ${def.color}66;background:${def.color}22;` : ''}">
+      <span class="ability-key">${def.hotkey}</span>
+      <span class="ability-icon">${def.icon}</span>
+      ${fillHtml}
+    </div>`;
+  }
+
   private renderOverdriveSlot(): string {
     const { phase, charge, activeTimer, cooldownTimer } = this.overdriveState;
     let stateClass: string;
@@ -4143,6 +4384,78 @@ export class FlightScene {
       <span class="ability-icon">${phase === 'active' ? '⚡' : '🔮'}</span>
       ${fillHtml}
     </div>`;
+  }
+
+  private updateCrewOrders(dt: number): void {
+    this.crewOrdersState = tickCrewOrders(this.crewOrdersState, dt);
+    const targetId = getCrewOrderTargetId(this.crewOrdersState);
+    if (targetId && !this.ships.some((ship) => ship.id === targetId && ship.alive)) {
+      this.crewOrdersState = clearCrewOrderTarget(this.crewOrdersState, targetId);
+    }
+    this.syncCrewOrderMarker();
+  }
+
+  private syncCrewOrderMarker(): void {
+    const activeTargetId = getCrewOrderTargetId(this.crewOrdersState);
+    const markerColor = this.getCrewOrderMarkerColor();
+    let targetShip: RuntimeShip | null = null;
+
+    for (const ship of this.ships) {
+      const marker = ship.group.getObjectByName('crew-order-marker');
+      if (marker) {
+        if (ship.id !== activeTargetId) {
+          ship.group.remove(marker);
+          if (marker instanceof THREE.Mesh) {
+            marker.geometry.dispose();
+            if (marker.material instanceof THREE.Material) marker.material.dispose();
+          }
+        } else {
+          targetShip = ship;
+        }
+      }
+    }
+
+    if (!activeTargetId) return;
+    targetShip = targetShip ?? this.ships.find((ship) => ship.id === activeTargetId && ship.alive) ?? null;
+    if (!targetShip) return;
+
+    const existing = targetShip.group.getObjectByName('crew-order-marker');
+    const pulse = 1 + Math.sin(this.elapsedEncounterSeconds * 7) * 0.08;
+    if (existing instanceof THREE.Mesh) {
+      existing.scale.setScalar(pulse);
+      existing.position.y = 0.95 + Math.sin(this.elapsedEncounterSeconds * 9) * 0.05;
+      if (existing.material instanceof THREE.MeshBasicMaterial) {
+        existing.material.color.set(markerColor);
+      }
+      return;
+    }
+
+    const marker = new THREE.Mesh(
+      new THREE.TorusGeometry(Math.max(0.8, targetShip.radius * 0.55), 0.08, 8, 28),
+      new THREE.MeshBasicMaterial({ color: markerColor, transparent: true, opacity: 0.92 }),
+    );
+    marker.name = 'crew-order-marker';
+    marker.rotation.x = Math.PI / 2;
+    marker.position.y = 0.95;
+    targetShip.group.add(marker);
+  }
+
+  private clearCrewOrderMarkers(): void {
+    for (const ship of this.ships) {
+      const marker = ship.group.getObjectByName('crew-order-marker');
+      if (!marker) continue;
+      ship.group.remove(marker);
+      if (marker instanceof THREE.Mesh) {
+        marker.geometry.dispose();
+        if (marker.material instanceof THREE.Material) marker.material.dispose();
+      }
+    }
+  }
+
+  private getCrewOrderMarkerColor(): string {
+    if (isOrderActive(this.crewOrdersState, 'gunner_focus')) return '#fb923c';
+    if (isOrderActive(this.crewOrdersState, 'tactician_link')) return '#a78bfa';
+    return '#f8fafc';
   }
 
   // ── Legacy Codex Methods ──────────────────────────────────
@@ -4307,7 +4620,7 @@ export class FlightScene {
         alive: s.alive,
       }));
 
-    const ai = computeWingmanAI({
+    const baseAi = computeWingmanAI({
       playerX: this.player.group.position.x,
       playerZ: this.player.group.position.z,
       playerRotation: this.player.group.rotation.y,
@@ -4317,6 +4630,23 @@ export class FlightScene {
       enemyPositions: enemies,
       wingmanFireInterval: 0.5,
     });
+    const commandedTargetId = getCrewOrderTargetId(this.crewOrdersState);
+    const commandedTarget = commandedTargetId
+      ? this.ships.find((ship) => ship.id === commandedTargetId && ship.alive && ship.team === 'enemy') ?? null
+      : null;
+    const ai = commandedTarget
+      ? {
+          ...baseAi,
+          moveX: commandedTarget.position.x,
+          moveZ: commandedTarget.position.z,
+          targetRotation: Math.atan2(
+            commandedTarget.position.x - this.wingmanShip.group.position.x,
+            commandedTarget.position.z - this.wingmanShip.group.position.z,
+          ),
+          shouldFire: commandedTarget.position.distanceTo(this.wingmanShip.group.position) < 18,
+          targetId: commandedTarget.id,
+        }
+      : baseAi;
 
     // Move wingman toward target position
     const dx = ai.moveX - this.wingmanShip.group.position.x;
