@@ -31,7 +31,7 @@ export interface StartingBonusDef {
   description: string;
   /** Effect applied at run start. */
     effect: {
-    kind: 'bonus_hp' | 'bonus_credits' | 'bonus_shield' | 'ability_cd_reduction' | 'heat_capacity' | 'dash_cd_reduction' | 'combo_window';
+    kind: 'bonus_hp' | 'bonus_credits' | 'bonus_shield' | 'ability_cd_reduction' | 'heat_capacity' | 'dash_cd_reduction' | 'combo_window' | 'credit_percent';
     value: number;
   };
 }
@@ -119,7 +119,7 @@ export const STARTING_BONUSES: StartingBonusDef[] = [
     displayName: 'Credit Hoarder',
     icon: '💎',
     description: '+10% credits earned per wave',
-    effect: { kind: 'bonus_credits', value: 10 },
+    effect: { kind: 'credit_percent', value: 10 },
   },
   {
     id: 'lucky_draw',
@@ -510,6 +510,13 @@ export function getActiveBonusEffects(legacy: LegacyState): StartingBonusDef['ef
     .map((id) => BONUS_BY_ID[id])
     .filter(Boolean)
     .map((b) => b.effect);
+}
+
+/** Returns the credit percentage boost from active bonuses (e.g. 10 for +10%). */
+export function getCreditPercentBoost(legacy: LegacyState): number {
+  return getActiveBonusEffects(legacy)
+    .filter((e) => e.kind === 'credit_percent')
+    .reduce((sum, e) => sum + e.value, 0);
 }
 
 // ── Query Helpers ────────────────────────────────────────────

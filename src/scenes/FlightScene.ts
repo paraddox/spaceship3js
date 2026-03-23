@@ -182,6 +182,7 @@ import {
   getLegacySummary,
   getActiveBonusEffects,
   getStartingBonusDef,
+  getCreditPercentBoost,
   STARTING_BONUSES,
   MILESTONES,
   DEFAULT_LEGACY_STATE,
@@ -1749,7 +1750,8 @@ export class FlightScene {
         this.endlessScore += endlessWaveScore(this.currentWave - 1) + this.comboState.totalComboScore;
         // Grant credits for each wave cleared, multiplied by combo
         const comboMult = getComboCreditMultiplier(this.comboState.kills);
-        const waveCredits = Math.floor(endlessWaveCredits(this.currentWave - 1) * comboMult) + this.endlessWaveEliteBonus;
+        const creditBoostMult = 1 + getCreditPercentBoost(this.legacyState) / 100;
+        const waveCredits = Math.floor(endlessWaveCredits(this.currentWave - 1) * comboMult * creditBoostMult) + this.endlessWaveEliteBonus;
         this.endlessWaveEliteBonus = 0;
         this.endlessCredits += waveCredits;
         this.onReward(this.encounterId, { credits: waveCredits, score: this.endlessScore, victory: true });
@@ -2409,6 +2411,19 @@ export class FlightScene {
           ? s.mutatorsChosen.map((m) => `<span style="color:#c084fc">${m}</span>`).join(' · ')
           : '<span style="color:#64748b">None</span>';
 
+        // Finalize legacy progression (idempotent)
+        this.finalizeLegacyRun(this.buildLegacySnapshot(grade));
+        const legacySummary = getLegacySummary(this.legacyState);
+        const legacyXpGained = computeLegacyXp(this.buildLegacySnapshot(grade));
+        const milestoneTags = this.legacyNewMilestones.length > 0
+          ? this.legacyNewMilestones.map((m) =>
+              `<span style="display:inline-block;background:#7c3aed20;color:#c084fc;padding:2px 8px;border-radius:4px;font-size:0.8em;margin:2px">${m.icon} ${m.displayName}</span>`
+            ).join('')
+          : '';
+        const xpPct = legacySummary.xpForNext > 0
+          ? Math.min(100, Math.floor((legacySummary.currentXp / legacySummary.xpForNext) * 100))
+          : 0;
+
         debrief.innerHTML = `
           <div style="text-align:center;margin-bottom:8px">
             <div style="font-size:2.4em;font-weight:900;color:${grade.color};line-height:1;text-shadow:0 0 12px ${grade.color}40">${grade.letter}</div>
@@ -2434,8 +2449,19 @@ export class FlightScene {
           ${highlights.length > 0 ? `<div style="text-align:center;margin-bottom:6px">${highlights.map((h) => `<span style="display:inline-block;background:#334155;color:#e2e8f0;padding:2px 8px;border-radius:4px;font-size:0.8em;margin:2px">⭐ ${h}</span>`).join('')}</div>` : ''}
           <div style="font-size:0.8em;margin-bottom:4px"><span style="color:#94a3b8">Traits:</span> ${mutatorTags}</div>
           <div style="font-size:0.8em;color:#fb7185;margin-bottom:6px">${cause}</div>
-          <div style="background:#0f172a;border-left:3px solid #38bdf8;padding:6px 8px;border-radius:0 4px 4px 0;font-size:0.8em;color:#94a3b8;margin-bottom:4px">
+          <div style="background:#0f172a;border-left:3px solid #38bdf8;padding:6px 8px;border-radius:0 4px 4px 0;font-size:0.8em;color:#94a3b8;margin-bottom:6px">
             <strong style="color:#38bdf8">Next run:</strong> ${tip}
+          </div>
+          <div style="background:#1e1b4b;border-radius:6px;padding:8px;margin-bottom:6px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <span style="font-size:0.8em;color:#c084fc;font-weight:600">${legacySummary.rank.icon} ${legacySummary.rank.name} Lv.${legacySummary.level}</span>
+              <span style="font-size:0.75em;color:#a78bfa">+${legacyXpGained} XP</span>
+            </div>
+            <div style="background:#312e81;border-radius:3px;height:6px;overflow:hidden;margin-bottom:4px">
+              <div style="background:linear-gradient(90deg,#7c3aed,#a78bfa);height:100%;width:${xpPct}%;border-radius:3px"></div>
+            </div>
+            <div style="font-size:0.7em;color:#6366f1">${legacySummary.currentXp} / ${legacySummary.xpForNext} XP to next level · ${legacySummary.milestonesCompleted}/${legacySummary.milestonesTotal} milestones</div>
+            ${milestoneTags ? `<div style="text-align:center;margin-top:4px">${milestoneTags}</div>` : ''}
           </div>
           <button class="primary" id="debrief-restart" style="width:100%;margin-top:4px;font-size:0.85em">↻ Restart</button>
         `;
@@ -3520,6 +3546,9 @@ export class FlightScene {
           for (const ability of this.player.abilities) {
             ability.cooldownRemaining *= (1 - effect.value / 100);
           }
+          break;
+        case 'credit_percent':
+          // No-op at run start — applied per-wave in wave-clear credit calculation
           break;
       }
     }
