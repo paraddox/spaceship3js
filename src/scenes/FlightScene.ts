@@ -2041,6 +2041,35 @@ export class FlightScene {
       ctx.stroke();
     }
 
+    // Boss telegraph indicators on minimap
+    if (this.bossAI) {
+      for (const telegraph of this.bossAI.telegraphs) {
+        const tx = cx + telegraph.position.x * scale;
+        const ty = cy + telegraph.position.z * scale;
+        const tr = telegraph.radius * scale;
+        const progress = 1 - telegraph.timeRemaining / telegraph.duration;
+        ctx.strokeStyle = `rgba(239, 68, 68, ${0.3 + progress * 0.5})`;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(tx, ty, Math.max(3, tr), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      // Beam sweep line on minimap
+      if (this.bossAI.activeAttack?.id === 'beam_sweep' && this.bossShip) {
+        const bx = cx + this.bossShip.position.x * scale;
+        const by = cy + this.bossShip.position.z * scale;
+        const beamLen = 20 * scale;
+        const endX = bx + Math.sin(this.bossAI.beamSweepAngle) * beamLen;
+        const endY = cy + Math.cos(this.bossAI.beamSweepAngle) * beamLen;
+        ctx.strokeStyle = 'rgba(255, 0, 102, 0.6)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bx, by);
+        ctx.lineTo(endX, endY);
+        ctx.stroke();
+      }
+    }
+
     // Ships
     for (const ship of this.ships) {
       if (!ship.alive) continue;
@@ -2072,6 +2101,36 @@ export class FlightScene {
           ctx.stroke();
         }
       } else if (ship.team === 'enemy') {
+        // Boss: larger pulsing red diamond
+        if (ship.isBoss) {
+          const bossPulse = 0.6 + 0.4 * Math.sin(this.elapsedEncounterSeconds * 4);
+          const bossR = 7;
+          ctx.fillStyle = `rgba(239, 68, 68, ${bossPulse})`;
+          ctx.beginPath();
+          ctx.moveTo(sx, sy - bossR);
+          ctx.lineTo(sx + bossR, sy);
+          ctx.lineTo(sx, sy + bossR);
+          ctx.lineTo(sx - bossR, sy);
+          ctx.closePath();
+          ctx.fill();
+          // Boss HP ring
+          const bossHpRatio = ship.hp / Math.max(1, ship.stats.maxHp);
+          ctx.strokeStyle = `rgba(239, 68, 68, 0.6)`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(sx, sy, bossR + 3, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * bossHpRatio);
+          ctx.stroke();
+          // Invulnerability indicator
+          if (this.bossAI && !isBossVulnerable(this.bossAI)) {
+            ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.arc(sx, sy, bossR + 6, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+        } else {
         // Enemy: dot with HP ring, colored for affixes
         const hpRatio = ship.hp / Math.max(1, ship.stats.maxHp);
         const shipAffixes = this.shipAffixes.get(ship.id);
@@ -2113,6 +2172,7 @@ export class FlightScene {
           ctx.arc(sx, sy, r + 2.5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * hpRatio);
           ctx.stroke();
         }
+        } // end non-boss enemy
       } else if (ship.protectedTarget) {
         // Protected ally: cyan diamond
         ctx.fillStyle = 'rgba(103, 232, 249, 0.9)';
@@ -2677,6 +2737,19 @@ export class FlightScene {
               // Track run stats (beam kill path)
               this.runStats.totalKills += 1;
               if (killedIsElite) this.runStats.eliteKills += 1;
+              // Boss kill tracking (beam death path)
+              if (ship.isBoss) {
+                this.runStats.bossKills += 1;
+                if (this.bossAI) this.bossAI = { ...this.bossAI, defeated: true };
+                this.bossShip = null;
+                playBossDefeated();
+                this.particles.emit(ParticleSystem.bossDeathExplosion(ship.position));
+                this.screenShake = createScreenShake(1.0, 0.8);
+                this.bossAnnouncement = '🏆 BOSS DEFEATED';
+                this.bossAnnouncementTimer = 3;
+                this.bossWarning = '';
+                this.clearBossTelegraphs();
+              }
               this.runStats.bestCombo = Math.max(this.runStats.bestCombo, this.comboState.kills);
               if (comboResult.tierUp) this.runStats.highestComboTier = getComboTier(this.comboState.kills).label;
               const comboMult2 = getComboTier(this.comboState.kills).multiplier;
