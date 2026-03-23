@@ -249,6 +249,8 @@ export class FlightScene {
   private endlessScore = 0;
   private endlessBestWave = 0;
   private endlessCredits = 0;
+  /** Accumulated elite credit bonus for the current wave, applied on wave clear. */
+  private endlessWaveEliteBonus = 0;
 
   // Upgrade shop
   private upgradeStats: LiveUpgradeStats = defaultLiveUpgradeStats();
@@ -256,6 +258,10 @@ export class FlightScene {
   private shopOpen = false;
   private shopOptions: UpgradeDef[] = [];
   private shopWaveCleared = 0;
+  /** Timed announcement shown in HUD for elite enemy spawns. */
+  private eliteAnnouncement = '';
+  /** Timer to fade out elite announcement (seconds remaining). */
+  private eliteAnnouncementTimer = 0;
 
   // VFX
   private readonly particles = new ParticleSystem();
@@ -354,6 +360,11 @@ export class FlightScene {
     this.updatePickups(dt);
     this.updatePlayerBuffs(dt);
     this.updateCombo(dt);
+    // Fade out elite announcement
+    if (this.eliteAnnouncementTimer > 0) {
+      this.eliteAnnouncementTimer -= dt;
+      if (this.eliteAnnouncementTimer <= 0) this.eliteAnnouncement = '';
+    }
     this.updateAbilities(dt);
     this.updateHealthBars();
     this.updateEncounterState();
@@ -574,6 +585,11 @@ export class FlightScene {
     this.endlessScore = 0;
     this.endlessBestWave = 0;
     this.endlessCredits = 0;
+    this.endlessWaveEliteBonus = 0;
+    this.eliteAnnouncement = '';
+    this.eliteAnnouncementTimer = 0;
+    this.shipAffixData.clear();
+    this.shipAffixes.clear();
     this.upgradeStats = defaultLiveUpgradeStats();
     this.purchasedUpgrades = [];
     this.shopOpen = false;
@@ -890,7 +906,7 @@ export class FlightScene {
         enemy.powerFactor,
         enemy.heat,
         enemy.stats.heatCapacity,
-      ) * (isAfterburning(enemy.abilities) ? 1.8 : 1);
+      ) * (isAfterburning(enemy.abilities) ? 1.8 : 1) * (enemy.affixThrustMult ?? 1);
 
       // Hazard avoidance steering
       const seekConduit = ctx.ownHpRatio < 0.5 && ctx.ownShieldRatio < 0.3;
@@ -935,7 +951,7 @@ export class FlightScene {
     if (!weapon) return;
     ship.weaponIndex = (ship.weaponIndex + 1) % ship.weapons.length;
 
-    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier : 1;
+    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier : (ship.affixFireRateMult ?? 1);
     const effectiveCadence = getEffectiveWeaponCadence(
       Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
       ship.powerFactor,
@@ -945,7 +961,7 @@ export class FlightScene {
     if (effectiveCadence <= 0.05) return;
 
     const normalizedDirection = direction.clone().normalize();
-    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier : 1;
+    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier : (ship.affixDamageMult ?? 1);
     const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier);
 
     if (weapon.archetype === 'beam') {
@@ -1233,6 +1249,8 @@ export class FlightScene {
       for (const config of ParticleSystem.deathExplosion(ship.position)) {
         this.particles.emit(config);
       }
+      // Affix: death explosion — damages nearby ships
+      this.handleAffixExplosion(ship);
       // Bigger screen shake for player death
       if (ship.team === 'player') {
         this.screenShake = createScreenShake(0.8, 0.5);
@@ -1241,6 +1259,12 @@ export class FlightScene {
       // Track kills in endless mode
       if (this.isEndlessMode && ship.team === 'enemy') {
         this.endlessTotalKills += 1;
+        // Elite credit bonus
+        const killedAffixes = this.shipAffixes.get(ship.id);
+        if (killedAffixes && killedAffixes.length > 0) {
+          this.endlessWaveEliteBonus += Math.floor(10 * eliteCreditsMultiplier(killedAffixes));
+        }
+        this.shipAffixes.delete(ship.id);
         // Combo system
         const result = registerComboKill(this.comboState);
         this.comboState = result.state;
@@ -1393,6 +1417,11 @@ export class FlightScene {
         ship.stats.shieldRecharge * (isShieldBoosted(ship.abilities) ? 2 : 1),
         dt,
       );
+      // Affix: HP regeneration (5% max HP per second)
+      const affixData = this.shipAffixData.get(ship.id);
+      if (affixData?.regeneratesHp && ship.alive && ship.hp < ship.stats.maxHp) {
+        ship.hp = Math.min(ship.stats.maxHp, ship.hp + ship.stats.maxHp * 0.05 * dt);
+      }
     }
   }
 
@@ -1470,7 +1499,8 @@ export class FlightScene {
         this.endlessScore += endlessWaveScore(this.currentWave - 1) + this.comboState.totalComboScore;
         // Grant credits for each wave cleared, multiplied by combo
         const comboMult = getComboCreditMultiplier(this.comboState.kills);
-        const waveCredits = Math.floor(endlessWaveCredits(this.currentWave - 1) * comboMult);
+        const waveCredits = Math.floor(endlessWaveCredits(this.currentWave - 1) * comboMult) + this.endlessWaveEliteBonus;
+        this.endlessWaveEliteBonus = 0;
         this.endlessCredits += waveCredits;
         this.onReward(this.encounterId, { credits: waveCredits, score: this.endlessScore, victory: true });
         // Reset combo score bank after applying (combo streak itself persists across waves)
@@ -1815,16 +1845,42 @@ export class FlightScene {
           ctx.stroke();
         }
       } else if (ship.team === 'enemy') {
-        // Enemy: red dot with HP ring
+        // Enemy: dot with HP ring, colored for affixes
         const hpRatio = ship.hp / Math.max(1, ship.stats.maxHp);
-        const r = 4;
-        ctx.fillStyle = `rgba(248, 113, 113, ${0.5 + hpRatio * 0.5})`;
+        const shipAffixes = this.shipAffixes.get(ship.id);
+        const hasAffixes = shipAffixes && shipAffixes.length > 0;
+        const elite = hasAffixes && isElite(shipAffixes!);
+        const affixColor = hasAffixes ? getAffixColor(shipAffixes!) : null;
+
+        // Parse affix color for canvas
+        let affixR = 248, affixG = 113, affixB = 113;
+        if (affixColor) {
+          affixR = parseInt(affixColor.slice(1, 3), 16);
+          affixG = parseInt(affixColor.slice(3, 5), 16);
+          affixB = parseInt(affixColor.slice(5, 7), 16);
+        }
+
+        const r = elite ? 5 : 4;
+        ctx.fillStyle = `rgba(${affixR}, ${affixG}, ${affixB}, ${0.5 + hpRatio * 0.5})`;
         ctx.beginPath();
         ctx.arc(sx, sy, r, 0, Math.PI * 2);
         ctx.fill();
+
+        // Elite pulsing outer ring
+        if (elite) {
+          const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.004);
+          ctx.strokeStyle = `rgba(${affixR}, ${affixG}, ${affixB}, ${0.2 + pulse * 0.3})`;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sx, sy, r + 3, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
         // HP ring
         if (hpRatio < 1) {
-          ctx.strokeStyle = hpRatio > 0.5 ? 'rgba(248, 113, 113, 0.4)' : 'rgba(239, 68, 68, 0.6)';
+          ctx.strokeStyle = hpRatio > 0.5
+            ? `rgba(${affixR}, ${affixG}, ${affixB}, 0.4)`
+            : `rgba(239, 68, 68, 0.6)`;
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.arc(sx, sy, r + 2.5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * hpRatio);
@@ -1960,6 +2016,7 @@ export class FlightScene {
       <p class="muted">${this.waveAnnouncement}</p>
       ${this.pickupAnnouncement ? `<p class="success" style="font-size:0.9em">${this.pickupAnnouncement}</p>` : ''}
       ${this.comboState.tierAnnouncement ? `<p style="font-size:1.1em;color:${getComboTier(this.comboState.kills).color};font-weight:700;text-shadow:0 0 8px ${getComboTier(this.comboState.kills).color}">${this.comboState.tierAnnouncement}</p>` : ''}
+      ${this.eliteAnnouncement ? `<p style="font-size:1em;color:#fbbf24;font-weight:600;text-shadow:0 0 6px rgba(251,191,36,0.5)">${this.eliteAnnouncement}</p>` : ''}
       ${this.playerBuffs.length > 0 ? `<div class="ability-bar">${this.playerBuffs.map((b) => `<div class="ability-slot active" title="${b.kind === 'power_surge' ? 'Power Surge' : 'Rapid Fire'} — ${b.remaining.toFixed(1)}s"><span class="ability-icon">${b.kind === 'power_surge' ? '⚡' : '🔥'}</span><span class="ability-fill active-fill" style="width:${(b.remaining / b.duration) * 100}%"></span></div>`).join('')}</div>` : ''}
       ${!this.player.alive
         ? this.isEndlessMode
@@ -2265,8 +2322,14 @@ export class FlightScene {
             for (const config of ParticleSystem.deathExplosion(ship.position)) {
               this.particles.emit(config);
             }
+            this.handleAffixExplosion(ship);
             if (this.isEndlessMode && ship.team === 'enemy') {
               this.endlessTotalKills += 1;
+              const killedAffixes = this.shipAffixes.get(ship.id);
+              if (killedAffixes && killedAffixes.length > 0) {
+                this.endlessWaveEliteBonus += Math.floor(10 * eliteCreditsMultiplier(killedAffixes));
+              }
+              this.shipAffixes.delete(ship.id);
               const comboResult = registerComboKill(this.comboState);
               this.comboState = comboResult.state;
               if (comboResult.tierUp) {
@@ -2460,6 +2523,8 @@ export class FlightScene {
 
   /** Map of ship ID → affix mods for tracking regeneration/explode. */
   private shipAffixData = new Map<string, { regeneratesHp: boolean; explodesOnDeath: boolean }>();
+  /** Map of ship ID → rolled affixes for credit bonus calculation. */
+  private shipAffixes = new Map<string, RolledAffix[]>();
 
   private applyAffixMods(ship: RuntimeShip, affixes: RolledAffix[]): void {
     const mods = computeAffixStats(affixes);
@@ -2490,6 +2555,13 @@ export class FlightScene {
       regeneratesHp: mods.regeneratesHp,
       explodesOnDeath: mods.explodesOnDeath,
     });
+    this.shipAffixes.set(ship.id, affixes);
+
+    // Announce elite enemies
+    if (isElite(affixes)) {
+      this.eliteAnnouncement = `⚡ Elite: ${ship.blueprint.name} — ${affixDisplayLabel(affixes)}`;
+      this.eliteAnnouncementTimer = 3;
+    }
 
     // Visual: tint enemy modules for affix color
     const color = getAffixColor(affixes);
@@ -2503,6 +2575,40 @@ export class FlightScene {
           }
         }
       });
+    }
+  }
+
+  /**
+   * Handle the "Explosive" affix death effect.
+   * Deals 30 flat damage to all ships within 5 units of the dying ship.
+   */
+  private handleAffixExplosion(ship: RuntimeShip): void {
+    const affixData = this.shipAffixData.get(ship.id);
+    if (!affixData?.explodesOnDeath) return;
+    this.shipAffixData.delete(ship.id);
+
+    const EXPLOSION_RADIUS = 5;
+    const EXPLOSION_DAMAGE = 30;
+
+    // Visual feedback
+    this.spawnExplosionVisual(ship.position, '#ff6600');
+    this.screenShake = createScreenShake(0.2, 0.15);
+
+    // Damage the player
+    const playerDist = ship.position.distanceTo(this.player.position);
+    if (playerDist < EXPLOSION_RADIUS && this.player.alive) {
+      const dmg = Math.round(EXPLOSION_DAMAGE * (1 - playerDist / EXPLOSION_RADIUS * 0.5));
+      this.applyDamage(this.player, dmg, 'kinetic', 0.5, 0);
+    }
+
+    // Damage other enemies (friendly fire)
+    for (const other of this.ships) {
+      if (other.id === ship.id || !other.alive) continue;
+      const dist = ship.position.distanceTo(other.position);
+      if (dist < EXPLOSION_RADIUS) {
+        const dmg = Math.round(EXPLOSION_DAMAGE * (1 - dist / EXPLOSION_RADIUS * 0.5));
+        this.applyDamage(other, dmg, 'kinetic', 0.5, 0);
+      }
     }
   }
 
