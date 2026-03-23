@@ -210,6 +210,16 @@ import {
   playBossAttack,
   playBossDefeated,
 } from '../game/audio';
+import {
+  createMusicDirector,
+  updateMusicDirector,
+  triggerBeat,
+  triggerDramaticMoment,
+  initMusicAudio,
+  resetMusicDirector,
+  destroyMusicAudio,
+  type MusicDirectorState,
+} from '../game/music-director';
 
 const REPAIR_HP_FRACTION = 0.75;
 
@@ -347,6 +357,11 @@ export class FlightScene {
   private bossAttackPlayed = false;
   private readonly bossTelegraphGroup = new THREE.Group();
 
+  // Battle music director
+  private musicState = createMusicDirector();
+  /** Track damage taken for music intensity (resets after no damage for 3s). */
+  private recentDamageTime = 0;
+
   // Run report card stats
   private runStats: RunStats = { ...DEFAULT_RUN_STATS };
 
@@ -476,6 +491,7 @@ export class FlightScene {
     this.updatePlayerBuffs(dt);
     this.updateCombo(dt);
     this.updateBoss(dt);
+    this.updateMusic(dt);
     // Fade out elite announcement
     if (this.eliteAnnouncementTimer > 0) {
       this.eliteAnnouncementTimer -= dt;
@@ -526,6 +542,7 @@ export class FlightScene {
     canvas.removeEventListener('pointermove', this.onPointerMove);
     canvas.removeEventListener('pointerdown', this.onPointerDown);
     canvas.removeEventListener('pointerup', this.onPointerUp);
+    destroyMusicAudio();
     this.uiRoot.innerHTML = '';
   }
 
@@ -716,6 +733,8 @@ export class FlightScene {
     this.bossTelegraphPlayed = false;
     this.bossAttackPlayed = false;
     this.clearBossTelegraphs();
+    initMusicAudio();
+    this.musicState = resetMusicDirector(this.musicState);
     this.runStats = { ...DEFAULT_RUN_STATS };
     this.upgradeStats = defaultLiveUpgradeStats();
     this.purchasedUpgrades = [];
@@ -1355,6 +1374,10 @@ export class FlightScene {
     if (ship.team === 'player' && isInvulnerable(this.dashState)) return;
     // Boss is invulnerable during phase transitions
     if (ship.isBoss && this.bossAI && !isBossVulnerable(this.bossAI)) return;
+    // Track player damage time for music intensity
+    if (ship.team === 'player' && rawDamage > 0) {
+      this.recentDamageTime = this.elapsedEncounterSeconds;
+    }
     const result: DamageResult = resolveDamage(
       rawDamage,
       damageType,
@@ -2974,6 +2997,7 @@ export class FlightScene {
     if (!prev.transitioning && this.bossAI.transitioning) {
       playBossPhaseTransition();
       this.particles.emit(ParticleSystem.bossPhaseTransition(this.bossShip.position));
+      this.musicState = triggerDramaticMoment(this.musicState, 3.0);
       const ann = getBossPhaseAnnouncement(this.bossAI);
       if (ann) {
         this.bossAnnouncement = ann;
@@ -3135,6 +3159,44 @@ export class FlightScene {
         child.geometry.dispose();
         (child.material as THREE.Material).dispose();
       }
+    }
+  }
+
+  // ── Battle Music Director ──────────────────────────────────
+
+  private updateMusic(dt: number): void {
+    const enemyCount = this.ships.filter(s => s.alive && s.team === 'enemy').length;
+    const playerHpFraction = this.player.hp / Math.max(1, this.player.stats.maxHp);
+    const playerTakingDamage = (this.elapsedEncounterSeconds - this.recentDamageTime) < 3;
+    // Map combo kills to a numeric tier (0-5) for music intensity
+    const comboTier = this.comboState.kills >= 20 ? 5
+      : this.comboState.kills >= 15 ? 4
+      : this.comboState.kills >= 10 ? 3
+      : this.comboState.kills >= 5 ? 2
+      : this.comboState.kills >= 2 ? 1
+      : 0;
+
+    const { state: newState, beatTriggered } = updateMusicDirector(
+      this.musicState,
+      dt,
+      {
+        inGame: true,
+        waveActive: this.currentWave > 0,
+        enemyCount,
+        comboTier,
+        overdriveActive: isOverdriveActive(this.overdriveState),
+        bossAlive: this.bossShip !== null && this.bossShip.alive,
+        bossPhaseIndex: this.bossAI?.phaseIndex ?? -1,
+        playerTakingDamage,
+        playerHpFraction,
+        waveTime: this.elapsedEncounterSeconds,
+      },
+    );
+
+    this.musicState = newState;
+
+    if (beatTriggered) {
+      triggerBeat(this.musicState);
     }
   }
 
