@@ -40,3 +40,18 @@ export function playComboTier(): void {
   tone(1100, 0.12, 0.05, 'sine');
   tone(1320, 0.15, 0.04, 'sine');
 }
+
+export function playOverdriveActivate(): void {
+  // Ascending power chord — dramatic activation feel
+  tone(220, 0.4, 0.08, 'sawtooth');
+  tone(330, 0.35, 0.06, 'sine');
+  tone(440, 0.3, 0.07, 'sine');
+  tone(660, 0.25, 0.05, 'sine');
+}
+
+export function playOverdriveDeactivate(): void {
+  // Descending fade — energy dissipating
+  tone(440, 0.3, 0.05, 'sine');
+  tone(330, 0.35, 0.04, 'sine');
+  tone(220, 0.4, 0.03, 'sawtooth');
+}

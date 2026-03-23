@@ -22,7 +22,7 @@ import { computeProjectileSpawnPosition } from '../game/projectiles';
 import { buildEncounterDebrief } from '../game/debrief';
 import { advanceProtectedAlly, chooseEnemyPriorityTarget, computeEscortProgress } from '../game/escort-ai';
 import { advanceEffect, createBeamEffect, createExplosionEffect, createImpactEffect, type CombatEffectState } from '../game/effects';
-import { playShoot, playLaser, playHit, playExplosion, playMissile, playBeam, resumeAudio, playComboTier } from '../game/audio';
+import { playShoot, playLaser, playHit, playExplosion, playMissile, playBeam, resumeAudio, playComboTier, playOverdriveActivate, playOverdriveDeactivate } from '../game/audio';
 import {
   computeFlankSeed,
   computeTacticalDecision,
@@ -127,6 +127,24 @@ import {
   affixDisplayLabel,
   type RolledAffix,
 } from '../game/elite-affixes';
+import {
+  createOverdriveState,
+  activateOverdrive,
+  tickOverdrive,
+  addOverdriveCharge,
+  isOverdriveActive,
+  canActivateOverdrive,
+  getOverdriveTimeScale,
+  getOverdriveDamageMult,
+  getOverdriveFireRateMult,
+  getOverdriveChargeFraction,
+  getOverdriveProgressFraction,
+  OVERDRIVE_DURATION,
+  OVERDRIVE_COOLDOWN,
+  OVERDRIVE_FULL_CHARGE,
+  OVERDRIVE_CHARGE_PER_KILL,
+  type OverdriveState,
+} from '../game/overdrive';
 
 const REPAIR_HP_FRACTION = 0.75;
 
@@ -280,6 +298,7 @@ export class FlightScene {
   private playerBuffs: ActiveBuff[] = [];
   private dashState: DashState = createDashState();
   private comboState: ComboState = createComboState();
+  private overdriveState: OverdriveState = createOverdriveState();
   private pickupAnnouncement = '';
   private pickupAnnouncementTimer = 0;
 
@@ -345,18 +364,20 @@ export class FlightScene {
 
     this.updateCameraFollow(dt);
     this.updateWaveDelay(dt);
+    this.updateOverdrive(dt);
+    const enemyDt = dt * getOverdriveTimeScale(this.overdriveState);
     this.updatePlayer(dt);
-    this.updateProtectedAllies(dt);
-    this.updateEnemies(dt);
-    this.updateDrones(dt);
-    this.updateProjectiles(dt);
-    this.updateEffects(dt);
+    this.updateProtectedAllies(enemyDt);
+    this.updateEnemies(enemyDt);
+    this.updateDrones(enemyDt);
+    this.updateProjectiles(enemyDt);
+    this.updateEffects(enemyDt);
     this.particles.update(dt);
     this.updateThrustTrails(dt);
     this.updateScreenShake(dt);
     this.coolShips(dt);
-    this.updateHazards(dt);
-    this.updateShipHazards(dt);
+    this.updateHazards(enemyDt);
+    this.updateShipHazards(enemyDt);
     this.updatePickups(dt);
     this.updatePlayerBuffs(dt);
     this.updateCombo(dt);
@@ -446,6 +467,8 @@ export class FlightScene {
           <li>A/D: strafe and orbit</li>
           <li>Mouse: aim ship</li>
           <li>Hold left click: fire</li>
+          <li>Space: dash</li>
+          <li>V: overdrive (when charged)</li>
           <li>1: Shield Boost · 2: Afterburner</li>
           <li>3: Overcharge · 4: Emergency Repair</li>
         </ul>
@@ -596,6 +619,7 @@ export class FlightScene {
     this.shopOptions = [];
     this.dashState = createDashState();
     this.comboState = createComboState();
+    this.overdriveState = createOverdriveState();
     this.shopWaveCleared = 0;
     this.waveAnnouncement = `${this.currentWave > 0 ? `Wave ${this.currentWave}` : 'Wave 1'} incoming...`;
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
@@ -782,6 +806,19 @@ export class FlightScene {
       this.particles.emit(ParticleSystem.dashBurst(this.player.position));
     }
 
+    // ── Overdrive (V) ──
+    if (this.keys.has('KeyV') && canActivateOverdrive(this.overdriveState)) {
+      const wasActive = isOverdriveActive(this.overdriveState);
+      this.overdriveState = activateOverdrive(this.overdriveState);
+      if (!wasActive && isOverdriveActive(this.overdriveState)) {
+        this.screenShake = createScreenShake(0.4, 0.35);
+        for (const config of ParticleSystem.deathExplosion(this.player.position)) {
+          this.particles.emit(config);
+        }
+        playOverdriveActivate();
+      }
+    }
+
     this.syncShipTransform(this.player);
   }
 
@@ -951,7 +988,7 @@ export class FlightScene {
     if (!weapon) return;
     ship.weaponIndex = (ship.weaponIndex + 1) % ship.weapons.length;
 
-    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier : (ship.affixFireRateMult ?? 1);
+    const cadenceBuff = ship.team === 'player' ? getCadenceMultiplier(this.playerBuffs) * this.upgradeStats.fireRateMultiplier * getOverdriveFireRateMult(this.overdriveState) : (ship.affixFireRateMult ?? 1);
     const effectiveCadence = getEffectiveWeaponCadence(
       Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
       ship.powerFactor,
@@ -961,7 +998,7 @@ export class FlightScene {
     if (effectiveCadence <= 0.05) return;
 
     const normalizedDirection = direction.clone().normalize();
-    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier : (ship.affixDamageMult ?? 1);
+    const buffMultiplier = ship.team === 'player' ? getDamageMultiplier(this.playerBuffs) * this.upgradeStats.damageMultiplier * getOverdriveDamageMult(this.overdriveState) : (ship.affixDamageMult ?? 1);
     const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier);
 
     if (weapon.archetype === 'beam') {
@@ -1268,6 +1305,9 @@ export class FlightScene {
         // Combo system
         const result = registerComboKill(this.comboState);
         this.comboState = result.state;
+        // Charge overdrive from combo kills (higher tier = more charge)
+        const comboTierMult = getComboTier(this.comboState.kills).multiplier;
+        this.overdriveState = addOverdriveCharge(this.overdriveState, OVERDRIVE_CHARGE_PER_KILL * comboTierMult);
         if (result.tierUp) {
           this.particles.emit(ParticleSystem.comboBurst(this.player.position, getComboTier(this.comboState.kills).color));
           this.screenShake = createScreenShake(0.25, 0.2);
@@ -2005,6 +2045,7 @@ export class FlightScene {
         ${this.renderAbilitySlot(this.player.abilities[2], '3', '⚡')}
         ${this.renderAbilitySlot(this.player.abilities[3], '4', '🔧')}
         ${this.renderDashSlot()}
+        ${this.isEndlessMode ? this.renderOverdriveSlot() : ''}
       </div>
       <p class="muted">Crew ${crewSummary}</p>
       ${this.isEndlessMode && this.comboState.kills >= 2 ? this.renderComboHud() : ''}
@@ -2016,7 +2057,8 @@ export class FlightScene {
       <p class="muted">${this.waveAnnouncement}</p>
       ${this.pickupAnnouncement ? `<p class="success" style="font-size:0.9em">${this.pickupAnnouncement}</p>` : ''}
       ${this.comboState.tierAnnouncement ? `<p style="font-size:1.1em;color:${getComboTier(this.comboState.kills).color};font-weight:700;text-shadow:0 0 8px ${getComboTier(this.comboState.kills).color}">${this.comboState.tierAnnouncement}</p>` : ''}
-      ${this.eliteAnnouncement ? `<p style="font-size:1em;color:#fbbf24;font-weight:600;text-shadow:0 0 6px rgba(251,191,36,0.5)">${this.eliteAnnouncement}</p>` : ''}
+      ${this.eliteAnnouncement ? `<p style=\"font-size:1em;color:#fbbf24;font-weight:600;text-shadow:0 0 6px rgba(251,191,36,0.5)\">${this.eliteAnnouncement}</p>` : ''}
+      ${isOverdriveActive(this.overdriveState) ? `<div class=\"overdrive-vignette\" style=\"opacity:${0.3 + 0.2 * Math.sin(this.elapsedEncounterSeconds * 8)}\"></div>` : ''}
       ${this.playerBuffs.length > 0 ? `<div class="ability-bar">${this.playerBuffs.map((b) => `<div class="ability-slot active" title="${b.kind === 'power_surge' ? 'Power Surge' : 'Rapid Fire'} — ${b.remaining.toFixed(1)}s"><span class="ability-icon">${b.kind === 'power_surge' ? '⚡' : '🔥'}</span><span class="ability-fill active-fill" style="width:${(b.remaining / b.duration) * 100}%"></span></div>`).join('')}</div>` : ''}
       ${!this.player.alive
         ? this.isEndlessMode
@@ -2332,6 +2374,8 @@ export class FlightScene {
               this.shipAffixes.delete(ship.id);
               const comboResult = registerComboKill(this.comboState);
               this.comboState = comboResult.state;
+              const comboMult2 = getComboTier(this.comboState.kills).multiplier;
+              this.overdriveState = addOverdriveCharge(this.overdriveState, OVERDRIVE_CHARGE_PER_KILL * comboMult2);
               if (comboResult.tierUp) {
                 this.particles.emit(ParticleSystem.comboBurst(this.player.position, getComboTier(this.comboState.kills).color));
                 this.screenShake = createScreenShake(0.25, 0.2);
@@ -2519,6 +2563,17 @@ export class FlightScene {
   private updateCombo(dt: number): void {
     if (!this.isEndlessMode) return;
     this.comboState = tickCombo(this.comboState, dt);
+  }
+
+  private updateOverdrive(dt: number): void {
+    if (!this.isEndlessMode) return;
+    const prev = this.overdriveState.phase;
+    this.overdriveState = tickOverdrive(this.overdriveState, dt);
+    // Deactivation VFX
+    if (prev === 'active' && this.overdriveState.phase !== 'active') {
+      this.screenShake = createScreenShake(0.3, 0.2);
+      playOverdriveDeactivate();
+    }
   }
 
   /** Map of ship ID → affix mods for tracking regeneration/explode. */
@@ -2736,6 +2791,32 @@ export class FlightScene {
     return `<div class="ability-slot ${stateClass}" title="Dash [Space]">
       <span class="ability-key">⎵</span>
       <span class="ability-icon">💨</span>
+      ${fillHtml}
+    </div>`;
+  }
+
+  private renderOverdriveSlot(): string {
+    const { phase, charge, activeTimer, cooldownTimer } = this.overdriveState;
+    let stateClass: string;
+    let fillHtml = '';
+    switch (phase) {
+      case 'active':
+        stateClass = 'active overdrive-active';
+        fillHtml = `<span class="ability-fill active-fill" style="width:${(activeTimer / OVERDRIVE_DURATION) * 100}%"></span>`;
+        break;
+      case 'cooldown':
+        stateClass = 'cooldown';
+        fillHtml = `<span class="ability-fill cooldown-fill" style="width:${(1 - cooldownTimer / OVERDRIVE_COOLDOWN) * 100}%"></span>`;
+        break;
+      default:
+        stateClass = charge >= OVERDRIVE_FULL_CHARGE ? 'ready overdrive-ready' : 'cooldown';
+        fillHtml = charge > 0 && charge < OVERDRIVE_FULL_CHARGE
+          ? `<span class="ability-fill cooldown-fill" style="width:${charge * 100}%"></span>`
+          : '';
+    }
+    return `<div class="ability-slot ${stateClass}" title="Overdrive [V]${phase === 'active' ? ` — ${activeTimer.toFixed(1)}s` : phase === 'cooldown' ? ` — recharging ${cooldownTimer.toFixed(0)}s` : charge >= OVERDRIVE_FULL_CHARGE ? ' — READY' : ` — ${Math.floor(charge * 100)}%`}" style="${stateClass.includes('overdrive-ready') ? 'box-shadow:0 0 12px rgba(168,85,247,0.6);border-color:#a855f7' : ''}">
+      <span class="ability-key">V</span>
+      <span class="ability-icon">${phase === 'active' ? '⚡' : '🔮'}</span>
       ${fillHtml}
     </div>`;
   }

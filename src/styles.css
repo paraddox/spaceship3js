@@ -401,3 +401,36 @@ ul {
   border-radius: 999px;
   transition: width 0.1s linear, background 0.2s;
 }
+
+/* ── Overdrive Vignette ── */
+
+.overdrive-vignette {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: 50;
+  background: radial-gradient(
+    ellipse at center,
+    transparent 30%,
+    rgba(168, 85, 247, 0.15) 60%,
+    rgba(168, 85, 247, 0.35) 100%
+  );
+}
+
+.overdrive-active {
+  animation: overdrive-pulse 0.5s ease-in-out infinite alternate;
+}
+
+@keyframes overdrive-pulse {
+  from { box-shadow: 0 0 8px rgba(168, 85, 247, 0.4); }
+  to   { box-shadow: 0 0 16px rgba(168, 85, 247, 0.8); }
+}
+
+.overdrive-ready {
+  animation: overdrive-glow 1.5s ease-in-out infinite alternate;
+}
+
+@keyframes overdrive-glow {
+  from { box-shadow: 0 0 8px rgba(168, 85, 247, 0.3); border-color: rgba(168, 85, 247, 0.5); }
+  to   { box-shadow: 0 0 16px rgba(168, 85, 247, 0.7); border-color: rgba(168, 85, 247, 1); }
+}
