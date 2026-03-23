@@ -34,3 +34,9 @@ export function playExplosion(): void {
   tone(60, 0.35, 0.1, 'sawtooth');
   tone(120, 0.25, 0.06, 'square');
 }
+
+export function playComboTier(): void {
+  tone(880, 0.08, 0.06, 'sine');
+  tone(1100, 0.12, 0.05, 'sine');
+  tone(1320, 0.15, 0.04, 'sine');
+}

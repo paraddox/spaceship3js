@@ -22,7 +22,7 @@ import { computeProjectileSpawnPosition } from '../game/projectiles';
 import { buildEncounterDebrief } from '../game/debrief';
 import { advanceProtectedAlly, chooseEnemyPriorityTarget, computeEscortProgress } from '../game/escort-ai';
 import { advanceEffect, createBeamEffect, createExplosionEffect, createImpactEffect, type CombatEffectState } from '../game/effects';
-import { playShoot, playLaser, playHit, playExplosion, playMissile, playBeam, resumeAudio } from '../game/audio';
+import { playShoot, playLaser, playHit, playExplosion, playMissile, playBeam, resumeAudio, playComboTier } from '../game/audio';
 import {
   computeFlankSeed,
   computeTacticalDecision,
@@ -110,6 +110,15 @@ import {
   getDashProgress,
   type DashState,
 } from '../game/dash';
+import {
+  createComboState,
+  registerComboKill,
+  tickCombo,
+  getComboTier,
+  getComboCreditMultiplier,
+  getComboTimerFraction,
+  type ComboState,
+} from '../game/combo';
 
 const REPAIR_HP_FRACTION = 0.75;
 
@@ -248,6 +257,7 @@ export class FlightScene {
   private readonly pickupMeshes = new Map<string, THREE.Object3D>();
   private playerBuffs: ActiveBuff[] = [];
   private dashState: DashState = createDashState();
+  private comboState: ComboState = createComboState();
   private pickupAnnouncement = '';
   private pickupAnnouncementTimer = 0;
 
@@ -327,6 +337,7 @@ export class FlightScene {
     this.updateShipHazards(dt);
     this.updatePickups(dt);
     this.updatePlayerBuffs(dt);
+    this.updateCombo(dt);
     this.updateAbilities(dt);
     this.updateHealthBars();
     this.updateEncounterState();
@@ -552,6 +563,7 @@ export class FlightScene {
     this.shopOpen = false;
     this.shopOptions = [];
     this.dashState = createDashState();
+    this.comboState = createComboState();
     this.shopWaveCleared = 0;
     this.waveAnnouncement = `${this.currentWave > 0 ? `Wave ${this.currentWave}` : 'Wave 1'} incoming...`;
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
@@ -1209,6 +1221,14 @@ export class FlightScene {
       // Track kills in endless mode
       if (this.isEndlessMode && ship.team === 'enemy') {
         this.endlessTotalKills += 1;
+        // Combo system
+        const result = registerComboKill(this.comboState);
+        this.comboState = result.state;
+        if (result.tierUp) {
+          this.particles.emit(ParticleSystem.comboBurst(this.player.position, getComboTier(this.comboState.kills).color));
+          this.screenShake = createScreenShake(0.25, 0.2);
+          playComboTier();
+        }
       }
 
       // Drop pickup on enemy kill
@@ -1427,11 +1447,14 @@ export class FlightScene {
       // Track kills from cleared waves in endless mode
       if (this.isEndlessMode) {
         this.endlessBestWave = this.currentWave - 1;
-        this.endlessScore += endlessWaveScore(this.currentWave - 1);
-        // Grant credits for each wave cleared
-        const waveCredits = endlessWaveCredits(this.currentWave - 1);
+        this.endlessScore += endlessWaveScore(this.currentWave - 1) + this.comboState.totalComboScore;
+        // Grant credits for each wave cleared, multiplied by combo
+        const comboMult = getComboCreditMultiplier(this.comboState.kills);
+        const waveCredits = Math.floor(endlessWaveCredits(this.currentWave - 1) * comboMult);
         this.endlessCredits += waveCredits;
         this.onReward(this.encounterId, { credits: waveCredits, score: this.endlessScore, victory: true });
+        // Reset combo score bank after applying (combo streak itself persists across waves)
+        this.comboState = { ...this.comboState, totalComboScore: 0 };
         // Open upgrade shop instead of immediately spawning next wave
         this.openUpgradeShop(this.currentWave);
       }
@@ -1908,6 +1931,7 @@ export class FlightScene {
         ${this.renderDashSlot()}
       </div>
       <p class="muted">Crew ${crewSummary}</p>
+      ${this.isEndlessMode && this.comboState.kills >= 2 ? this.renderComboHud() : ''}
       ${this.player.maxShield > 0 ? `<div class="meter shield"><span style="width:${shieldRatio * 100}%"></span></div>` : ''}
       <div class="meter"><span style="width:${hpRatio * 100}%"></span></div>
       <div class="meter heat"><span style="width:${Math.min(100, heatRatio * 100)}%"></span></div>
@@ -1915,6 +1939,7 @@ export class FlightScene {
       <p class="muted">${this.encounterObjective.label}</p>
       <p class="muted">${this.waveAnnouncement}</p>
       ${this.pickupAnnouncement ? `<p class="success" style="font-size:0.9em">${this.pickupAnnouncement}</p>` : ''}
+      ${this.comboState.tierAnnouncement ? `<p style="font-size:1.1em;color:${getComboTier(this.comboState.kills).color};font-weight:700;text-shadow:0 0 8px ${getComboTier(this.comboState.kills).color}">${this.comboState.tierAnnouncement}</p>` : ''}
       ${this.playerBuffs.length > 0 ? `<div class="ability-bar">${this.playerBuffs.map((b) => `<div class="ability-slot active" title="${b.kind === 'power_surge' ? 'Power Surge' : 'Rapid Fire'} — ${b.remaining.toFixed(1)}s"><span class="ability-icon">${b.kind === 'power_surge' ? '⚡' : '🔥'}</span><span class="ability-fill active-fill" style="width:${(b.remaining / b.duration) * 100}%"></span></div>`).join('')}</div>` : ''}
       ${!this.player.alive
         ? this.isEndlessMode
@@ -1928,7 +1953,7 @@ export class FlightScene {
       if (this.encounterOutcome === 'continue' && !this.isEndlessMode) {
         debrief.innerHTML = '';
       } else if (this.isEndlessMode && (this.encounterOutcome === 'defeat' || !this.player.alive)) {
-        debrief.innerHTML = `<strong>Run Over</strong><br>Wave ${this.currentWave} · ${this.endlessTotalKills} kills<br>Score: ${this.endlessScore.toLocaleString()}<br>Best wave: ${this.endlessBestWave}`;
+        debrief.innerHTML = `<strong>Run Over</strong><br>Wave ${this.currentWave} · ${this.endlessTotalKills} kills<br>Score: ${this.endlessScore.toLocaleString()}<br>Best wave: ${this.endlessBestWave}<br>Best combo: ${this.comboState.bestKills}x`;
       } else if (this.encounterOutcome !== 'continue') {
         const report = buildEncounterDebrief({
           encounterName: this.encounterId,
@@ -2220,6 +2245,16 @@ export class FlightScene {
             for (const config of ParticleSystem.deathExplosion(ship.position)) {
               this.particles.emit(config);
             }
+            if (this.isEndlessMode && ship.team === 'enemy') {
+              this.endlessTotalKills += 1;
+              const comboResult = registerComboKill(this.comboState);
+              this.comboState = comboResult.state;
+              if (comboResult.tierUp) {
+                this.particles.emit(ParticleSystem.comboBurst(this.player.position, getComboTier(this.comboState.kills).color));
+                this.screenShake = createScreenShake(0.25, 0.2);
+                playComboTier();
+              }
+            }
           }
           // Shield drain multiplier handled via reduced recharge in coolShips
         }
@@ -2398,6 +2433,11 @@ export class FlightScene {
     this.playerBuffs = updateBuffs(this.playerBuffs, dt);
   }
 
+  private updateCombo(dt: number): void {
+    if (!this.isEndlessMode) return;
+    this.comboState = tickCombo(this.comboState, dt);
+  }
+
   // ── Upgrade Shop ──────────────────────────────────────────────
 
   private openUpgradeShop(waveCleared: number): void {
@@ -2466,6 +2506,24 @@ export class FlightScene {
     this.player.maxShield += s.shieldBonus;
     this.player.shield = Math.min(this.player.shield + s.shieldBonus, this.player.maxShield);
     this.player.hp = Math.min(this.player.hp + s.maxHpBonus, this.player.stats.maxHp);
+  }
+
+  private renderComboHud(): string {
+    const tier = getComboTier(this.comboState.kills);
+    const timerFrac = getComboTimerFraction(this.comboState);
+    const timerColor = timerFrac < 0.3 ? '#ef4444' : tier.color;
+    return `
+      <div class="combo-display">
+        <div class="combo-counter" style="color:${tier.color};text-shadow:0 0 10px ${tier.color}">
+          <span class="combo-icon">${tier.icon}</span>
+          <span class="combo-kills">${this.comboState.kills}</span>
+          <span class="combo-x">x</span>
+          <span class="combo-mult">${tier.multiplier}</span>
+        </div>
+        <div class="combo-label">${tier.label}</div>
+        <div class="combo-timer"><span style="width:${timerFrac * 100}%;background:${timerColor}"></span></div>
+      </div>
+    `;
   }
 
   private renderAbilitySlot(ability: AbilityRuntime, key: string, icon: string): string {

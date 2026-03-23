@@ -306,6 +306,22 @@ export class ParticleSystem {
     };
   }
 
+  static comboBurst(position: THREE.Vector3, color = '#fbbf24'): ParticleConfig {
+    return {
+      position: position.clone().setY(0.3),
+      count: 24,
+      speed: [3, 8],
+      life: [0.3, 0.7],
+      gravity: -1,
+      startScale: [0.2, 0.45],
+      endScale: [0, 0.05],
+      startOpacity: 0.9,
+      endOpacity: 0,
+      color,
+      drag: 3,
+    };
+  }
+
   // ── Internal ──
 
   private findInactive(): Particle | null {
