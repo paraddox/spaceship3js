@@ -264,6 +264,18 @@ import {
   MAX_ESSENCE_SLOTS,
 } from '../game/mutagen';
 import {
+  type ActiveContract,
+  type ContractOffer,
+  acceptContract,
+  armContract,
+  generateContractOffers,
+  getContractProgressLabel,
+  isTerminalContract,
+  registerPriorityTargetKill,
+  resolveContractOnWaveEnd,
+  tickContract,
+} from '../game/contracts';
+import {
   type CrisisEffectId,
   type CrisisState,
   type CrisisEventDef,
@@ -449,6 +461,10 @@ export class FlightScene {
   private shopOpen = false;
   private shopOptions: UpgradeDef[] = [];
   private shopWaveCleared = 0;
+  private contractOffers: ContractOffer[] = [];
+  private activeContract: ActiveContract | null = null;
+  private contractAnnouncement = '';
+  private contractAnnouncementTimer = 0;
 
   // Mutator traits
   private activeMutators: ActiveMutator[] = [];
@@ -610,6 +626,7 @@ export class FlightScene {
     this.updateBoss(dt);
     this.updateMusic(dt);
     this.updateWingman(dt);
+    this.updateContracts(dt);
     // Tick crisis event timers
     if (this.crisisEliteKillBuffTimer > 0) {
       this.crisisEliteKillBuffTimer -= dt;
@@ -640,6 +657,10 @@ export class FlightScene {
     if (this.mutagenAnnouncementTimer > 0) {
       this.mutagenAnnouncementTimer -= dt;
       if (this.mutagenAnnouncementTimer <= 0) this.mutagenAnnouncement = '';
+    }
+    if (this.contractAnnouncementTimer > 0) {
+      this.contractAnnouncementTimer -= dt;
+      if (this.contractAnnouncementTimer <= 0) this.contractAnnouncement = '';
     }
     this.updateAbilities(dt);
     this.updateHealthBars();
@@ -884,6 +905,11 @@ export class FlightScene {
     this.purchasedUpgrades = [];
     this.shopOpen = false;
     this.shopOptions = [];
+    this.contractOffers = [];
+    this.activeContract = null;
+    this.contractAnnouncement = '';
+    this.contractAnnouncementTimer = 0;
+    this.clearContractMarkers();
     this.activeMutators = [];
     this.shopMutatorOptions = [];
     this.dashState = createDashState();
@@ -999,6 +1025,28 @@ export class FlightScene {
       // Apply elite affix stat modifications
       if (enemy.affixes && enemy.affixes.length > 0) {
         this.applyAffixMods(runtimeShip, enemy.affixes);
+      }
+    }
+
+    if (this.activeContract && this.activeContract.waveNumber === waveNumber) {
+      const armed = armContract(
+        this.activeContract,
+        wave.enemies.map((enemy) => ({
+          id: enemy.id,
+          label: enemy.blueprint.name,
+          maxHp: computeShipStats(enemy.blueprint).maxHp,
+          affixCount: enemy.affixes?.length ?? 0,
+          isBoss: bossWave,
+        })),
+      );
+      if (armed.kind === 'priority_target' && armed.targetShipId) {
+        const targetShip = this.ships.find((ship) => ship.id === armed.targetShipId && ship.alive);
+        if (targetShip) this.addContractMarker(targetShip);
+      }
+      if (isTerminalContract(armed)) {
+        this.resolveActiveContract(armed);
+      } else {
+        this.activeContract = armed;
       }
     }
   }
@@ -1648,6 +1696,14 @@ export class FlightScene {
       this.handleAffixExplosion(ship);
       // Blueprint scavenging (elite/boss kill)
       this.handleSalvageOnKill(ship);
+      if (this.isEndlessMode && ship.team === 'enemy' && this.activeContract?.kind === 'priority_target') {
+        const contractHit = registerPriorityTargetKill(this.activeContract, ship.id);
+        if (isTerminalContract(contractHit)) {
+          this.resolveActiveContract(contractHit);
+        } else {
+          this.activeContract = contractHit;
+        }
+      }
       // Mutagen: collect essence from elite/boss kills
       if (this.isEndlessMode && ship.team === 'enemy') {
         const killedAffixes = this.shipAffixes.get(ship.id);
@@ -1965,6 +2021,15 @@ export class FlightScene {
     this.encounterOutcome = progress.outcome;
 
     if (progress.shouldSpawnWave && this.waveDelay <= 0) {
+      if (this.isEndlessMode && this.activeContract && this.activeContract.waveNumber === this.currentWave) {
+        const resolvedContract = resolveContractOnWaveEnd(this.activeContract, true);
+        if (isTerminalContract(resolvedContract)) {
+          this.resolveActiveContract(resolvedContract);
+        } else {
+          this.activeContract = resolvedContract;
+        }
+      }
+
       this.currentWave = progress.nextWave;
       this.waveDelay = WAVE_RESPAWN_DELAY;
 
@@ -2022,9 +2087,10 @@ export class FlightScene {
       }
     }
     if (progress.outcome === 'defeat') {
+      if (this.isEndlessMode && this.activeContract && this.activeContract.waveNumber === this.currentWave) {
+        this.resolveActiveContract(resolveContractOnWaveEnd(this.activeContract, false));
+      }
       if (this.isEndlessMode) {
-        // Count enemies killed this wave
-        const waveEnemies = this.waves[this.currentWave - 1]?.enemies.length ?? 0;
         this.endlessScore += endlessWaveScore(this.currentWave);
         this.waveAnnouncement = `Wave ${this.currentWave} · defeated after ${this.endlessTotalKills} kills`;
       } else {
@@ -2440,6 +2506,25 @@ export class FlightScene {
           ctx.stroke();
         }
 
+        if (this.activeContract?.kind === 'priority_target' && this.activeContract.targetShipId === ship.id) {
+          const pulse = 0.45 + 0.35 * Math.sin(this.elapsedEncounterSeconds * 7);
+          ctx.strokeStyle = `rgba(251, 191, 36, ${pulse})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(sx, sy, r + 5, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(sx - (r + 7), sy);
+          ctx.lineTo(sx - (r + 3), sy);
+          ctx.moveTo(sx + (r + 3), sy);
+          ctx.lineTo(sx + (r + 7), sy);
+          ctx.moveTo(sx, sy - (r + 7));
+          ctx.lineTo(sx, sy - (r + 3));
+          ctx.moveTo(sx, sy + (r + 3));
+          ctx.lineTo(sx, sy + (r + 7));
+          ctx.stroke();
+        }
+
         // HP ring
         if (hpRatio < 1) {
           ctx.strokeStyle = hpRatio > 0.5
@@ -2536,6 +2621,28 @@ export class FlightScene {
       }
 
       const restRepair = this.shopWaveCleared > 0 && this.shopWaveCleared % 5 === 0;
+      const contractCards = this.contractOffers.map((offer, i) => {
+        const def = offer.reward.essenceId ? getMutationDef(offer.reward.essenceId) : null;
+        const rewardLine = this.renderContractReward(offer);
+        return `<div class="contract-card" style="border-color:${offer.color};background:rgba(${parseInt(offer.color.slice(1,3),16)},${parseInt(offer.color.slice(3,5),16)},${parseInt(offer.color.slice(5,7),16)},0.08)">
+          <div style="font-size:1.35em">${offer.icon}</div>
+          <strong style="color:${offer.color}">${offer.displayName}</strong>
+          <p style="margin:4px 0;color:#e2e8f0">${offer.description}</p>
+          <small style="color:#94a3b8;font-style:italic">${offer.flavor}</small>
+          <div style="margin-top:6px;font-size:0.78em;color:${offer.color}">${rewardLine}</div>
+          ${def ? `<div style="font-size:0.76em;color:${def.color};margin-top:2px">Reward cache: ${def.icon} ${def.displayName}</div>` : ''}
+          <button class="primary" data-contract="${i}" style="font-size:0.85em;background:${offer.color};border-color:${offer.color};margin-top:8px">
+            Accept Contract
+          </button>
+        </div>`;
+      }).join('');
+      const acceptedContractHtml = this.activeContract && this.activeContract.waveNumber === this.shopWaveCleared
+        ? `<div class="contract-status-box" style="margin-bottom:8px;border-color:${this.activeContract.color};background:rgba(${parseInt(this.activeContract.color.slice(1,3),16)},${parseInt(this.activeContract.color.slice(3,5),16)},${parseInt(this.activeContract.color.slice(5,7),16)},0.08)">
+            <strong style="color:${this.activeContract.color}">${this.activeContract.icon} Contract locked for Wave ${this.shopWaveCleared}</strong>
+            <div style="margin-top:4px;color:#e2e8f0">${this.activeContract.displayName} — ${this.activeContract.description}</div>
+            <div style="margin-top:4px;font-size:0.8em;color:${this.activeContract.color}">${this.renderContractReward(this.activeContract)}</div>
+          </div>`
+        : '';
       const upgradeCards = this.shopOptions.map((u, i) => {
         const cost = upgradeCost(u, this.shopWaveCleared);
         const canAfford = this.endlessCredits >= cost;
@@ -2592,6 +2699,9 @@ export class FlightScene {
           <strong style="font-size:1.1em;color:#e2e8f0">⚡ Upgrade Shop — Wave ${this.shopWaveCleared} Cleared</strong>
           ${restRepair ? '<p class="success">🔧 Rest stop: hull partially repaired!</p>' : ''}
         </div>
+        ${acceptedContractHtml}
+        ${contractCards ? `<div style="text-align:center;margin-bottom:6px"><span style="color:#f59e0b;font-size:0.85em;font-weight:600">— Optional Void Contract —</span></div><div class="contract-grid">${contractCards}</div>` : ''}
+        ${contractCards && (mutatorCards || essenceCards || upgradeCards.length > 0) ? '<div style="text-align:center;margin:8px 0"><span style="color:#64748b">— and then —</span></div>' : ''}
         ${mutatorCards ? `<div style="text-align:center;margin-bottom:6px"><span style="color:#c084fc;font-size:0.85em;font-weight:600">— Offered Trait —</span></div><div class="upgrade-grid">${mutatorCards}</div>` : ''}
         ${essenceCards ? `<div style="text-align:center;margin-bottom:6px"><span style="color:#34d399;font-size:0.85em;font-weight:600">— Absorb Essence (${this.mutagenState.pendingEssence.length}/${MAX_ESSENCE_SLOTS}) —</span></div><div class="upgrade-grid">${essenceCards}</div>` : ''}
         ${essenceCards && upgradeCards.length > 0 ? '<div style="text-align:center;margin:8px 0"><span style="color:#64748b">— or —</span></div>' : ''}
@@ -2604,6 +2714,19 @@ export class FlightScene {
         <p class="muted" style="margin-top:6px">Upgrades: ${this.purchasedUpgrades.length} · ${mutatorSlots} · Score: ${this.endlessScore.toLocaleString()}</p>
       `;
 
+      // Bind contract buttons
+      hud.querySelectorAll('[data-contract]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt((btn as HTMLElement).dataset.contract ?? '0', 10);
+          const offer = this.contractOffers[idx];
+          if (!offer) return;
+          this.activeContract = acceptContract(offer);
+          this.contractOffers = [];
+          this.contractAnnouncement = `📜 Contract accepted — ${offer.displayName}`;
+          this.contractAnnouncementTimer = 2.5;
+          this.refreshHud();
+        });
+      });
       // Bind upgrade card buttons
       hud.querySelectorAll('[data-upgrade]').forEach((btn) => {
         btn.addEventListener('click', () => {
@@ -2683,6 +2806,7 @@ export class FlightScene {
       </div>
       <p class="muted">Crew ${crewSummary}</p>
       ${this.isEndlessMode && this.comboState.kills >= 2 ? this.renderComboHud() : ''}
+      ${this.activeContract ? `<div class="contract-status-box" style="border-color:${this.activeContract.color};background:rgba(${parseInt(this.activeContract.color.slice(1,3),16)},${parseInt(this.activeContract.color.slice(3,5),16)},${parseInt(this.activeContract.color.slice(5,7),16)},0.08)"><div style="display:flex;justify-content:space-between;align-items:center"><strong style="color:${this.activeContract.color}">${this.activeContract.icon} ${this.activeContract.displayName}</strong><span style="color:${this.activeContract.color};font-size:0.78em">${this.renderContractReward(this.activeContract)}</span></div><div style="margin-top:4px;color:#e2e8f0">${getContractProgressLabel(this.activeContract)}</div></div>` : ''}
       ${this.player.maxShield > 0 ? `<div class="meter shield"><span style="width:${shieldRatio * 100}%"></span></div>` : ''}
       <div class="meter"><span style="width:${hpRatio * 100}%"></span></div>
       <div class="meter heat"><span style="width:${Math.min(100, heatRatio * 100)}%"></span></div>
@@ -2696,6 +2820,7 @@ export class FlightScene {
       ${this.bossWarning ? `<p style=\"font-size:1em;color:#f97316;font-weight:600;text-shadow:0 0 6px rgba(249,115,22,0.5)\">${this.bossWarning}</p>` : ''}
       ${this.salvageAnnouncement ? `<p style=\"font-size:1.05em;color:#c084fc;font-weight:600;text-shadow:0 0 8px rgba(192,132,252,0.5)\">${this.salvageAnnouncement}</p>` : ''}
       ${this.mutagenAnnouncement ? `<div style="color:#34d399;font-size:0.9em;text-align:center;text-shadow:0 0 8px #34d399">${this.mutagenAnnouncement}</div>` : ''}
+      ${this.contractAnnouncement ? `<div style="color:#fbbf24;font-size:0.92em;text-align:center;text-shadow:0 0 8px rgba(251,191,36,0.55)">${this.contractAnnouncement}</div>` : ''}
       ${this.bossShip && this.bossShip.alive ? (() => {
         const bHp = Math.max(0, this.bossShip.hp);
         const bMax = this.bossShip.stats.maxHp;
@@ -3110,6 +3235,14 @@ export class FlightScene {
             this.handleAffixExplosion(ship);
             // Blueprint scavenging (elite/boss kill — beam death path)
             this.handleSalvageOnKill(ship);
+            if (this.isEndlessMode && ship.team === 'enemy' && this.activeContract?.kind === 'priority_target') {
+              const contractHit = registerPriorityTargetKill(this.activeContract, ship.id);
+              if (isTerminalContract(contractHit)) {
+                this.resolveActiveContract(contractHit);
+              } else {
+                this.activeContract = contractHit;
+              }
+            }
             // Mutagen: collect essence from elite/boss kills (beam path)
             if (this.isEndlessMode && ship.team === 'enemy') {
               const essenceAffixes = this.shipAffixes.get(ship.id);
@@ -3686,12 +3819,137 @@ export class FlightScene {
     }
   }
 
+  private updateContracts(dt: number): void {
+    if (!this.activeContract) return;
+
+    if (this.activeContract.status === 'active') {
+      const next = tickContract(this.activeContract, dt, this.comboState.kills);
+      if (next.kind === 'priority_target') {
+        this.animateContractMarker();
+      }
+      if (isTerminalContract(next)) {
+        this.resolveActiveContract(next);
+        return;
+      }
+      this.activeContract = next;
+    }
+  }
+
+  private resolveActiveContract(contract: ActiveContract): void {
+    this.clearContractMarkers();
+    if (contract.status === 'completed') {
+      const rewardSummary = this.grantContractReward(contract);
+      this.contractAnnouncement = `📜 ${contract.successMessage ?? 'Contract complete.'} ${rewardSummary}`.trim();
+      this.contractAnnouncementTimer = 3.5;
+    } else {
+      this.contractAnnouncement = `📜 ${contract.failureMessage ?? 'Contract failed.'}`;
+      this.contractAnnouncementTimer = 3;
+    }
+    this.activeContract = null;
+  }
+
+  private grantContractReward(contract: ActiveContract): string {
+    let creditsRewarded = contract.reward.credits;
+    const rewardBits = [`+${contract.reward.credits} credits`, `+${contract.reward.score} score`];
+
+    this.endlessCredits += contract.reward.credits;
+    this.endlessScore += contract.reward.score;
+
+    if (contract.reward.overdriveCharge) {
+      this.overdriveState = addOverdriveCharge(
+        this.overdriveState,
+        OVERDRIVE_FULL_CHARGE * contract.reward.overdriveCharge,
+      );
+      rewardBits.push(`+${Math.round(contract.reward.overdriveCharge * 100)}% overdrive`);
+    }
+
+    if (contract.reward.essenceId) {
+      const beforeEssence = this.mutagenState.pendingEssence.length;
+      this.mutagenState = collectEssenceFromKill(
+        this.mutagenState,
+        [contract.reward.essenceId],
+        false,
+        this.currentWave,
+      );
+      if (this.mutagenState.pendingEssence.length > beforeEssence) {
+        persistMutagenState(this.mutagenState);
+        const def = getMutationDef(contract.reward.essenceId);
+        rewardBits.push(`${def?.icon ?? '🧬'} essence secured`);
+      } else {
+        creditsRewarded += 12;
+        this.endlessCredits += 12;
+        rewardBits.push('+12 credits (essence bay full)');
+      }
+    }
+
+    this.onReward(this.encounterId, {
+      credits: creditsRewarded,
+      score: this.endlessScore,
+      victory: true,
+    });
+    return rewardBits.join(' · ');
+  }
+
+  private animateContractMarker(): void {
+    if (!this.activeContract || this.activeContract.kind !== 'priority_target') return;
+    const target = this.ships.find((ship) => ship.id === this.activeContract?.targetShipId && ship.alive);
+    const marker = target?.group.getObjectByName('contract-target-marker');
+    if (!marker) return;
+    const pulse = 1 + Math.sin(this.elapsedEncounterSeconds * 8) * 0.08;
+    marker.scale.setScalar(pulse);
+    marker.rotation.z += 0.05;
+    marker.position.y = 0.7 + Math.sin(this.elapsedEncounterSeconds * 10) * 0.04;
+  }
+
+  private addContractMarker(ship: RuntimeShip): void {
+    this.clearContractMarkers();
+    const existing = ship.group.getObjectByName('contract-target-marker');
+    if (existing) return;
+    const marker = new THREE.Mesh(
+      new THREE.TorusGeometry(Math.max(0.65, ship.radius * 0.5), 0.08, 8, 24),
+      new THREE.MeshBasicMaterial({
+        color: '#fbbf24',
+        transparent: true,
+        opacity: 0.9,
+      }),
+    );
+    marker.name = 'contract-target-marker';
+    marker.rotation.x = Math.PI / 2;
+    marker.position.y = 0.7;
+    ship.group.add(marker);
+  }
+
+  private clearContractMarkers(): void {
+    for (const ship of this.ships) {
+      const marker = ship.group.getObjectByName('contract-target-marker');
+      if (!marker) continue;
+      ship.group.remove(marker);
+      if (marker instanceof THREE.Mesh) {
+        marker.geometry.dispose();
+        if (marker.material instanceof THREE.Material) marker.material.dispose();
+      }
+    }
+  }
+
+  private renderContractReward(offer: ContractOffer): string {
+    const parts = [`+${offer.reward.credits} credits`, `+${offer.reward.score} score`];
+    if (offer.reward.overdriveCharge) {
+      parts.push(`+${Math.round(offer.reward.overdriveCharge * 100)}% overdrive`);
+    }
+    if (offer.reward.essenceId) {
+      const def = getMutationDef(offer.reward.essenceId);
+      parts.push(`${def?.icon ?? '🧬'} essence`);
+    }
+    return parts.join(' · ');
+  }
+
   // ── Upgrade Shop ──────────────────────────────────────────────
 
   private openUpgradeShop(waveCleared: number): void {
     this.shopWaveCleared = waveCleared;
     this.shopOptions = generateUpgradeOptions(waveCleared, this.purchasedUpgrades);
     this.shopMutatorOptions = this.generateMutatorOptions(waveCleared);
+    this.contractOffers = generateContractOffers(waveCleared, isBossWave(waveCleared));
 
     // Free hull repair every 5 waves
     if (waveCleared > 0 && waveCleared % 5 === 0) {
@@ -3722,6 +3980,7 @@ export class FlightScene {
     this.shopOpen = false;
     this.shopOptions = [];
     this.shopMutatorOptions = [];
+    this.contractOffers = [];
     // Resume wave spawn — the wave delay handles the timing
     this.waveDelay = 0.5; // Brief delay before next wave spawns
     this.waveAnnouncement = `Wave ${this.currentWave} incoming...`;

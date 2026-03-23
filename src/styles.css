@@ -335,6 +335,31 @@ ul {
   cursor: not-allowed;
 }
 
+/* ── Contracts ── */
+
+.contract-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.contract-card,
+.contract-status-box {
+  border: 1px solid #475569;
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(15, 23, 42, 0.88);
+}
+
+.contract-card button {
+  width: 100%;
+}
+
+.contract-status-box {
+  margin: 8px 0;
+}
+
 /* ── Crisis Event Cards ── */
 
 .crisis-choice-grid {
@@ -375,7 +400,8 @@ ul {
 }
 
 @media (max-width: 700px) {
-  .crisis-choice-grid {
+  .crisis-choice-grid,
+  .contract-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -1,0 +1,288 @@
+import type { MutagenId } from './mutagen';
+
+export type ContractKind = 'priority_target' | 'blink_blitz' | 'chain_harvest';
+export type ContractStatus = 'accepted' | 'active' | 'completed' | 'failed';
+
+export interface ContractReward {
+  credits: number;
+  score: number;
+  overdriveCharge?: number;
+  essenceId?: MutagenId;
+}
+
+export interface ContractOffer {
+  kind: ContractKind;
+  waveNumber: number;
+  displayName: string;
+  description: string;
+  flavor: string;
+  icon: string;
+  color: string;
+  reward: ContractReward;
+  timeLimitSeconds?: number;
+  comboGoal?: number;
+}
+
+export interface ActiveContract extends ContractOffer {
+  status: ContractStatus;
+  elapsedSeconds: number;
+  comboPeak: number;
+  targetShipId?: string;
+  targetLabel?: string;
+  successMessage?: string;
+  failureMessage?: string;
+}
+
+export interface ContractTargetCandidate {
+  id: string;
+  label: string;
+  maxHp: number;
+  affixCount: number;
+  isBoss: boolean;
+}
+
+const CONTRACT_ROTATION: ContractKind[] = ['priority_target', 'blink_blitz', 'chain_harvest'];
+const ESSENCE_ROTATION: MutagenId[] = [
+  'aggressive',
+  'tough',
+  'gunner',
+  'shielded',
+  'swift',
+  'overcharged',
+  'veteran',
+  'regenerating',
+  'juggernaut',
+  'explosive',
+];
+
+export function generateContractOffers(waveNumber: number, bossWave = false): ContractOffer[] {
+  const kinds = pickOfferKinds(waveNumber, bossWave);
+  return kinds.map((kind) => buildOffer(kind, waveNumber, bossWave));
+}
+
+export function acceptContract(offer: ContractOffer): ActiveContract {
+  return {
+    ...offer,
+    status: 'accepted',
+    elapsedSeconds: 0,
+    comboPeak: 0,
+  };
+}
+
+export function armContract(contract: ActiveContract, targets: ContractTargetCandidate[]): ActiveContract {
+  if (contract.status !== 'accepted') return contract;
+  if (contract.kind !== 'priority_target') {
+    return { ...contract, status: 'active' };
+  }
+
+  const target = pickPriorityTarget(targets);
+  if (!target) {
+    return {
+      ...contract,
+      status: 'failed',
+      failureMessage: 'Contract void — no valid target entered the arena.',
+    };
+  }
+
+  return {
+    ...contract,
+    status: 'active',
+    targetShipId: target.id,
+    targetLabel: target.label,
+  };
+}
+
+export function tickContract(contract: ActiveContract, dt: number, comboKills: number): ActiveContract {
+  if (contract.status !== 'active') return contract;
+
+  const elapsedSeconds = contract.elapsedSeconds + dt;
+  const comboPeak = Math.max(contract.comboPeak, comboKills);
+  const next: ActiveContract = {
+    ...contract,
+    elapsedSeconds,
+    comboPeak,
+  };
+
+  if (next.kind === 'blink_blitz' && next.timeLimitSeconds && elapsedSeconds > next.timeLimitSeconds) {
+    return {
+      ...next,
+      status: 'failed',
+      failureMessage: 'Contract failed — blitz window expired.',
+    };
+  }
+
+  if (next.kind === 'chain_harvest' && next.comboGoal && comboPeak >= next.comboGoal) {
+    return {
+      ...next,
+      status: 'completed',
+      successMessage: `Contract complete — combo chain hit ${next.comboGoal}.`,
+    };
+  }
+
+  return next;
+}
+
+export function registerPriorityTargetKill(contract: ActiveContract, shipId: string): ActiveContract {
+  if (contract.status !== 'active' || contract.kind !== 'priority_target') return contract;
+  if (contract.targetShipId !== shipId) return contract;
+  return {
+    ...contract,
+    status: 'completed',
+    successMessage: `Contract complete — ${contract.targetLabel ?? 'priority target'} neutralized.`,
+  };
+}
+
+export function resolveContractOnWaveEnd(contract: ActiveContract, waveCleared: boolean): ActiveContract {
+  if (contract.status === 'completed' || contract.status === 'failed') return contract;
+
+  if (!waveCleared) {
+    return {
+      ...contract,
+      status: 'failed',
+      failureMessage: 'Contract failed — you lost the wave before cashing out.',
+    };
+  }
+
+  if (contract.kind === 'blink_blitz') {
+    return contract.timeLimitSeconds && contract.elapsedSeconds <= contract.timeLimitSeconds
+      ? {
+          ...contract,
+          status: 'completed',
+          successMessage: 'Contract complete — wave cleared inside the blitz window.',
+        }
+      : {
+          ...contract,
+          status: 'failed',
+          failureMessage: 'Contract failed — wave clear came too late.',
+        };
+  }
+
+  if (contract.kind === 'chain_harvest') {
+    return contract.comboGoal && contract.comboPeak >= contract.comboGoal
+      ? {
+          ...contract,
+          status: 'completed',
+          successMessage: `Contract complete — combo chain hit ${contract.comboGoal}.`,
+        }
+      : {
+          ...contract,
+          status: 'failed',
+          failureMessage: 'Contract failed — combo threshold not reached.',
+        };
+  }
+
+  return {
+    ...contract,
+    status: 'failed',
+    failureMessage: 'Contract failed — marked target escaped destruction.',
+  };
+}
+
+export function isTerminalContract(contract: ActiveContract | null): boolean {
+  return contract?.status === 'completed' || contract?.status === 'failed';
+}
+
+export function getContractProgressLabel(contract: ActiveContract): string {
+  if (contract.kind === 'priority_target') {
+    return contract.targetLabel ? `Target: ${contract.targetLabel}` : 'Target uplink pending';
+  }
+
+  if (contract.kind === 'blink_blitz') {
+    const remaining = Math.max(0, (contract.timeLimitSeconds ?? 0) - contract.elapsedSeconds);
+    return `${remaining.toFixed(1)}s remaining`;
+  }
+
+  const goal = contract.comboGoal ?? 0;
+  return `${Math.min(contract.comboPeak, goal)} / ${goal} combo`;
+}
+
+function pickOfferKinds(waveNumber: number, bossWave: boolean): ContractKind[] {
+  if (bossWave) return ['priority_target', 'blink_blitz'];
+  const start = waveNumber % CONTRACT_ROTATION.length;
+  return [
+    CONTRACT_ROTATION[start],
+    CONTRACT_ROTATION[(start + 1) % CONTRACT_ROTATION.length],
+  ];
+}
+
+function buildOffer(kind: ContractKind, waveNumber: number, bossWave: boolean): ContractOffer {
+  switch (kind) {
+    case 'priority_target':
+      return {
+        kind,
+        waveNumber,
+        displayName: bossWave ? 'Flagship Bounty' : 'Priority Bounty',
+        description: bossWave
+          ? 'The next boss wave designates a flagship. Destroy it to cash out immediately.'
+          : 'The next wave marks a high-value target. Eliminate it before the wave ends.',
+        flavor: bossWave
+          ? 'Someone out there wants that flagship gone badly enough to pay in advance.'
+          : 'A clean kill, a fast transfer, and no questions asked.',
+        icon: '🎯',
+        color: '#f59e0b',
+        reward: {
+          credits: Math.round(26 + waveNumber * 9 + (bossWave ? 24 : 0)),
+          score: Math.round(140 + waveNumber * 36 + (bossWave ? 180 : 0)),
+        },
+      };
+    case 'blink_blitz':
+      return {
+        kind,
+        waveNumber,
+        displayName: 'Blink Blitz',
+        description: `Clear the next wave within ${getBlitzTimeLimit(waveNumber, bossWave)} seconds.`,
+        flavor: 'Move like the contract is closing around you, because it is.',
+        icon: '⏱️',
+        color: '#22c55e',
+        reward: {
+          credits: Math.round(22 + waveNumber * 8 + (bossWave ? 18 : 0)),
+          score: Math.round(120 + waveNumber * 32 + (bossWave ? 120 : 0)),
+          overdriveCharge: bossWave ? 0.35 : 0.22,
+        },
+        timeLimitSeconds: getBlitzTimeLimit(waveNumber, bossWave),
+      };
+    case 'chain_harvest':
+      return {
+        kind,
+        waveNumber,
+        displayName: 'Chain Harvest',
+        description: `Reach a ${getComboGoal(waveNumber)} kill combo during the next wave.`,
+        flavor: 'The underwriters only pay if you make the whole kill-chain sing.',
+        icon: '⚡',
+        color: '#a855f7',
+        reward: {
+          credits: Math.round(18 + waveNumber * 7),
+          score: Math.round(110 + waveNumber * 28),
+          essenceId: ESSENCE_ROTATION[(waveNumber + 2) % ESSENCE_ROTATION.length],
+        },
+        comboGoal: getComboGoal(waveNumber),
+      };
+  }
+}
+
+function pickPriorityTarget(targets: ContractTargetCandidate[]): ContractTargetCandidate | null {
+  if (targets.length === 0) return null;
+  let best = targets[0];
+  let bestScore = scoreTarget(best);
+  for (const target of targets.slice(1)) {
+    const score = scoreTarget(target);
+    if (score > bestScore) {
+      best = target;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function scoreTarget(target: ContractTargetCandidate): number {
+  return target.maxHp + target.affixCount * 180 + (target.isBoss ? 800 : 0);
+}
+
+function getBlitzTimeLimit(waveNumber: number, bossWave: boolean): number {
+  if (bossWave) return Math.max(24, 38 - Math.floor(waveNumber / 2));
+  return Math.max(12, 24 - Math.floor(waveNumber / 4));
+}
+
+function getComboGoal(waveNumber: number): number {
+  return Math.min(6, Math.max(2, 2 + Math.floor(waveNumber / 5)));
+}
