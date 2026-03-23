@@ -118,6 +118,16 @@ import {
   chainReactionActive,
 } from '../game/mutators';
 import {
+  type RunStats,
+  DEFAULT_RUN_STATS,
+  computeRunGrade,
+  formatTime,
+  formatBig,
+  getCauseOfDeath,
+  getNextRunTip,
+  getHighlights,
+} from '../game/run-report';
+import {
   createDashState,
   canDash,
   startDash,
@@ -286,6 +296,9 @@ export class FlightScene {
   private endlessCredits = 0;
   /** Accumulated elite credit bonus for the current wave, applied on wave clear. */
   private endlessWaveEliteBonus = 0;
+
+  // Run report card stats
+  private runStats: RunStats = { ...DEFAULT_RUN_STATS };
 
   // Upgrade shop
   private upgradeStats: LiveUpgradeStats = defaultLiveUpgradeStats();
@@ -634,6 +647,7 @@ export class FlightScene {
     this.eliteAnnouncementTimer = 0;
     this.shipAffixData.clear();
     this.shipAffixes.clear();
+    this.runStats = { ...DEFAULT_RUN_STATS };
     this.upgradeStats = defaultLiveUpgradeStats();
     this.purchasedUpgrades = [];
     this.shopOpen = false;
@@ -826,6 +840,7 @@ export class FlightScene {
         this.dashState, forward.x, forward.z, right.x, right.z,
         shipRot, this.upgradeStats.dashCooldownReduction,
       );
+      if (this.isEndlessMode) this.runStats.dashCount += 1;
       this.particles.emit(ParticleSystem.dashBurst(this.player.position));
     }
 
@@ -834,6 +849,7 @@ export class FlightScene {
       const wasActive = isOverdriveActive(this.overdriveState);
       this.overdriveState = activateOverdrive(this.overdriveState);
       if (!wasActive && isOverdriveActive(this.overdriveState)) {
+        if (this.isEndlessMode) this.runStats.overdriveActivations += 1;
         this.screenShake = createScreenShake(0.4, 0.35);
         for (const config of ParticleSystem.deathExplosion(this.player.position)) {
           this.particles.emit(config);
@@ -1249,6 +1265,11 @@ export class FlightScene {
     ship.shield -= result.shieldAbsorbed;
     ship.heat = Math.min(ship.stats.heatCapacity * 1.25, ship.heat + rawDamage * 0.08);
     playHit();
+    // Run stat tracking
+    if (this.isEndlessMode) {
+      if (ship.team === 'player') this.runStats.damageTaken += result.hullDamage;
+      else this.runStats.damageDealt += result.hullDamage;
+    }
 
     if (result.shieldAbsorbed > 0) {
       this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#38bdf8' : '#f9a8d4');
@@ -1345,6 +1366,11 @@ export class FlightScene {
         // Combo system
         const result = registerComboKill(this.comboState);
         this.comboState = result.state;
+        // Track run stats
+        this.runStats.totalKills += 1;
+        if (killedIsElite) this.runStats.eliteKills += 1;
+        this.runStats.bestCombo = Math.max(this.runStats.bestCombo, this.comboState.kills);
+        if (result.tierUp) this.runStats.highestComboTier = getComboTier(this.comboState.kills).label;
         // Charge overdrive from combo kills (higher tier = more charge)
         const comboTierMult = getComboTier(this.comboState.kills).multiplier;
         this.overdriveState = addOverdriveCharge(this.overdriveState, OVERDRIVE_CHARGE_PER_KILL * comboTierMult);
@@ -1576,6 +1602,11 @@ export class FlightScene {
       // Track kills from cleared waves in endless mode
       if (this.isEndlessMode) {
         this.endlessBestWave = this.currentWave - 1;
+        // Track run stats
+        this.runStats.waveReached = this.currentWave - 1;
+        this.runStats.score = this.endlessScore;
+        this.runStats.creditsEarned = this.endlessCredits;
+        this.runStats.timeSeconds = this.elapsedEncounterSeconds;
         this.endlessScore += endlessWaveScore(this.currentWave - 1) + this.comboState.totalComboScore;
         // Grant credits for each wave cleared, multiplied by combo
         const comboMult = getComboCreditMultiplier(this.comboState.kills);
@@ -2139,7 +2170,60 @@ export class FlightScene {
       if (this.encounterOutcome === 'continue' && !this.isEndlessMode) {
         debrief.innerHTML = '';
       } else if (this.isEndlessMode && (this.encounterOutcome === 'defeat' || !this.player.alive)) {
-        debrief.innerHTML = `<strong>Run Over</strong><br>Wave ${this.currentWave} · ${this.endlessTotalKills} kills<br>Score: ${this.endlessScore.toLocaleString()}<br>Best wave: ${this.endlessBestWave}<br>Best combo: ${this.comboState.bestKills}x`;
+        // Finalize run stats
+        const s: RunStats = {
+          ...this.runStats,
+          waveReached: this.endlessBestWave || (this.currentWave - 1),
+          totalKills: this.endlessTotalKills,
+          score: this.endlessScore,
+          creditsEarned: this.endlessCredits,
+          timeSeconds: this.elapsedEncounterSeconds,
+          hpRemaining: Math.max(0, this.player.hp),
+          maxHp: this.player.stats.maxHp,
+        };
+        const grade = computeRunGrade(s);
+        const highlights = getHighlights(s);
+        const tip = getNextRunTip(grade, s);
+        const cause = getCauseOfDeath(s);
+        const dmgRatio = s.damageTaken > 0 ? (s.damageDealt / s.damageTaken).toFixed(1) : '∞';
+        const kpm = s.timeSeconds > 0 ? (s.totalKills / (s.timeSeconds / 60)).toFixed(1) : '—';
+        const mutatorTags = s.mutatorsChosen.length > 0
+          ? s.mutatorsChosen.map((m) => `<span style="color:#c084fc">${m}</span>`).join(' · ')
+          : '<span style="color:#64748b">None</span>';
+
+        debrief.innerHTML = `
+          <div style="text-align:center;margin-bottom:8px">
+            <div style="font-size:2.4em;font-weight:900;color:${grade.color};line-height:1;text-shadow:0 0 12px ${grade.color}40">${grade.letter}</div>
+            <div style="font-size:0.85em;color:${grade.color};font-weight:600;margin-top:2px">${grade.label}</div>
+          </div>
+          <div style="background:#1e293b;border-radius:6px;padding:8px;margin-bottom:6px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:0.85em">
+              <span style="color:#94a3b8">Wave Reached</span><span style="text-align:right;font-weight:600">${s.waveReached}</span>
+              <span style="color:#94a3b8">Total Kills</span><span style="text-align:right;font-weight:600">${formatBig(s.totalKills)}</span>
+              <span style="color:#94a3b8">Score</span><span style="text-align:right;font-weight:600;color:#fbbf24">${s.score.toLocaleString()}</span>
+              <span style="color:#94a3b8">Credits Earned</span><span style="text-align:right;font-weight:600">${s.creditsEarned.toLocaleString()}</span>
+              <span style="color:#94a3b8">Time Survived</span><span style="text-align:right;font-weight:600">${formatTime(s.timeSeconds)}</span>
+              <span style="color:#94a3b8">Best Combo</span><span style="text-align:right;font-weight:600">${s.bestCombo}x ${s.highestComboTier}</span>
+              <span style="color:#94a3b8">Damage Efficiency</span><span style="text-align:right;font-weight:600">${dmgRatio}x</span>
+              <span style="color:#94a3b8">Kills/Min</span><span style="text-align:right;font-weight:600">${kpm}</span>
+              <span style="color:#94a3b8">Pickups</span><span style="text-align:right;font-weight:600">${s.pickupsCollected}</span>
+              <span style="color:#94a3b8">Elites Slain</span><span style="text-align:right;font-weight:600">${s.eliteKills}</span>
+              <span style="color:#94a3b8">Dashes</span><span style="text-align:right;font-weight:600">${s.dashCount}</span>
+              <span style="color:#94a3b8">Overdrives</span><span style="text-align:right;font-weight:600">${s.overdriveActivations}</span>
+              <span style="color:#94a3b8">Upgrades</span><span style="text-align:right;font-weight:600">${s.upgradesPurchased.length}</span>
+            </div>
+          </div>
+          ${highlights.length > 0 ? `<div style="text-align:center;margin-bottom:6px">${highlights.map((h) => `<span style="display:inline-block;background:#334155;color:#e2e8f0;padding:2px 8px;border-radius:4px;font-size:0.8em;margin:2px">⭐ ${h}</span>`).join('')}</div>` : ''}
+          <div style="font-size:0.8em;margin-bottom:4px"><span style="color:#94a3b8">Traits:</span> ${mutatorTags}</div>
+          <div style="font-size:0.8em;color:#fb7185;margin-bottom:6px">${cause}</div>
+          <div style="background:#0f172a;border-left:3px solid #38bdf8;padding:6px 8px;border-radius:0 4px 4px 0;font-size:0.8em;color:#94a3b8;margin-bottom:4px">
+            <strong style="color:#38bdf8">Next run:</strong> ${tip}
+          </div>
+          <button class="primary" id="debrief-restart" style="width:100%;margin-top:4px;font-size:0.85em">↻ Restart</button>
+        `;
+        document.getElementById('debrief-restart')?.addEventListener('click', () => {
+          this.spawnEncounter(cloneBlueprint(this.player.blueprint));
+        });
       } else if (this.encounterOutcome !== 'continue') {
         const report = buildEncounterDebrief({
           encounterName: this.encounterId,
@@ -2455,6 +2539,11 @@ export class FlightScene {
               }
               const comboResult = registerComboKill(this.comboState);
               this.comboState = comboResult.state;
+              // Track run stats (beam kill path)
+              this.runStats.totalKills += 1;
+              if (killedIsElite) this.runStats.eliteKills += 1;
+              this.runStats.bestCombo = Math.max(this.runStats.bestCombo, this.comboState.kills);
+              if (comboResult.tierUp) this.runStats.highestComboTier = getComboTier(this.comboState.kills).label;
               const comboMult2 = getComboTier(this.comboState.kills).multiplier;
               this.overdriveState = addOverdriveCharge(this.overdriveState, OVERDRIVE_CHARGE_PER_KILL * comboMult2);
               if (comboResult.tierUp) {
@@ -2612,6 +2701,7 @@ export class FlightScene {
 
             this.pickupAnnouncement = `${getPickupIcon(result.kind ?? 'shield_cell')} ${getPickupLabel(result.kind ?? 'shield_cell')} collected!`;
             this.pickupAnnouncementTimer = 2.0;
+            if (this.isEndlessMode) this.runStats.pickupsCollected += 1;
 
             // Remove pickup
             this.pickupGroup.remove(mesh);
@@ -2772,6 +2862,7 @@ export class FlightScene {
     this.endlessCredits -= cost;
     this.upgradeStats = applyUpgrade(this.upgradeStats, upgrade);
     this.purchasedUpgrades.push({ def: upgrade, wavePurchased: this.shopWaveCleared });
+    this.runStats.upgradesPurchased.push(upgrade.displayName);
 
     // Rebuild player stats from base + all upgrade bonuses
     this.rebuildPlayerWithUpgrades();
@@ -2811,6 +2902,7 @@ export class FlightScene {
   private purchaseMutator(mutator: MutatorDef): void {
     if (!canAddMutator(this.activeMutators, mutator)) return;
     this.activeMutators.push({ def: mutator, acquiredWave: this.shopWaveCleared });
+    this.runStats.mutatorsChosen.push(mutator.displayName);
     // Apply stat modifications immediately
     this.upgradeStats = applyMutatorStatMods(this.upgradeStats, this.activeMutators);
     this.rebuildPlayerWithUpgrades();
