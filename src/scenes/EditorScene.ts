@@ -2,9 +2,32 @@ import * as THREE from 'three';
 import { HEX_HEIGHT, HEX_SIZE, generateHexRing, hexKey, hexToWorld, normalizeRotation, worldToHex } from '../core/hex';
 import type { CrewAllocation, HexCoord, ModuleDefinition, ShipBlueprint } from '../core/types';
 import type { ProgressionState } from '../game/progression';
+import {
+  MAX_ACTIVE_BONUSES,
+  MILESTONES,
+  STARTING_BONUSES,
+  canActivateBonus,
+  getLegacySummary,
+  isMilestoneCompleted,
+  loadLegacyState,
+  persistLegacyState,
+  toggleActiveBonus,
+} from '../game/legacy';
 import { DEFAULT_CREW_ALLOCATION, applyCrewModifiers } from '../game/crew';
 import { ENCOUNTER_PRESETS } from '../game/encounters';
 import type { HangarEntry } from '../game/hangar';
+import {
+  RARITY_CONFIG,
+  getCollectionStats,
+  loadSalvageCollection,
+  type SalvagedBlueprint,
+} from '../game/salvage';
+import {
+  buildWingmanConfig,
+  getPrepBaySummary,
+  sortPrepBayEntries,
+} from '../game/prep-bay';
+import { loadWingmanConfig, persistWingmanConfig, type WingmanConfig } from '../game/wingman';
 import { MODULE_UNLOCK_COSTS, canUnlockModule, isModuleUnlocked } from '../game/unlocks';
 import { PALETTE_GROUPS } from '../data/moduleCatalog';
 import { buildPreviewGroup, buildShipGroup } from '../rendering/shipFactory';
@@ -66,6 +89,9 @@ export class EditorScene {
   private hangarEntries: HangarEntry[];
   private progression: ProgressionState;
   private selectedEncounterId: string;
+  private salvageEntries: SalvagedBlueprint[] = [];
+  private legacyState = loadLegacyState();
+  private wingmanConfig: WingmanConfig | null = loadWingmanConfig();
   private selectedModuleId = 'core:bridge_scout';
   private previewRotation = 0;
   private hoveredHex: HexCoord | null = null;
@@ -124,6 +150,9 @@ export class EditorScene {
     this.hangarEntries = hangarEntries;
     this.progression = progression;
     this.selectedEncounterId = selectedEncounterId;
+    this.salvageEntries = loadSalvageCollection().entries;
+    this.legacyState = loadLegacyState();
+    this.wingmanConfig = loadWingmanConfig();
     this.onBlueprintChange = onBlueprintChange;
     this.onEncounterChange = onEncounterChange;
     this.onSaveToHangar = onSaveToHangar;
@@ -243,6 +272,14 @@ export class EditorScene {
           <button class="encounter-button" data-encounter="endless" title="Infinite procedurally-generated waves with escalating difficulty. Earn credits and push your limits." style="border-color:rgba(251,191,36,0.5);">∞ Endless Gauntlet</button>
         </div>
         <div id="encounter-briefing" class="muted"></div>
+        <h2>Endless Prep Bay</h2>
+        <div id="prep-bay-summary" class="progression-summary"></div>
+        <div id="legacy-bonus-grid" class="prep-grid"></div>
+        <div id="milestone-grid" class="prep-grid"></div>
+        <div class="toolbar-row">
+          <button data-action="clear-wingman">Clear Wingman</button>
+        </div>
+        <div id="salvage-grid" class="salvage-grid"></div>
         <h2>Hangar</h2>
         <div class="toolbar-row">
           <button data-action="save-hangar">Save Current Ship</button>
@@ -337,6 +374,10 @@ export class EditorScene {
             }
           }
         }
+        if (action === 'clear-wingman') {
+          this.wingmanConfig = null;
+          persistWingmanConfig(null);
+        }
         if (action === 'launch') {
           if (!isBlueprintLaunchReady(this.blueprint)) {
             this.refreshInfo();
@@ -413,6 +454,10 @@ export class EditorScene {
     const encounterBriefingEl = this.uiRoot.querySelector('#encounter-briefing');
     const validationEl = this.uiRoot.querySelector('#editor-validation');
     const crewEl = this.uiRoot.querySelector('#crew-grid');
+    const prepSummaryEl = this.uiRoot.querySelector('#prep-bay-summary');
+    const legacyBonusEl = this.uiRoot.querySelector('#legacy-bonus-grid');
+    const milestoneEl = this.uiRoot.querySelector('#milestone-grid');
+    const salvageEl = this.uiRoot.querySelector('#salvage-grid');
     const hangarEl = this.uiRoot.querySelector('#hangar-grid');
     if (progressionEl) {
       const bestScore = this.progression.bestEncounterScores[this.selectedEncounterId] ?? 0;
@@ -423,6 +468,91 @@ export class EditorScene {
         <div class="progression-pill"><span>Completed Encounters</span><strong>${this.progression.completedEncounterIds.length}</strong></div>
         <div class="progression-pill"><span>${isEndless ? 'Endless' : completed ? 'Best Score' : 'Target Encounter'}</span><strong>${isEndless ? '∞ waves' : completed ? bestScore : this.selectedEncounterId}</strong></div>
       `;
+    }
+    const prepSummary = getPrepBaySummary(
+      { entries: this.salvageEntries, totalAttempts: 0, totalSalvaged: this.salvageEntries.length },
+      this.legacyState,
+      this.wingmanConfig,
+    );
+    const legacySummary = getLegacySummary(this.legacyState);
+    const salvageStats = getCollectionStats({
+      entries: this.salvageEntries,
+      totalAttempts: 0,
+      totalSalvaged: this.salvageEntries.length,
+    });
+    const sortedSalvage = sortPrepBayEntries(this.salvageEntries, this.wingmanConfig?.blueprintId ?? null);
+    if (prepSummaryEl) {
+      prepSummaryEl.innerHTML = `
+        <div class="progression-pill"><span>Legacy Rank</span><strong>${prepSummary.rankLabel}</strong></div>
+        <div class="progression-pill"><span>Best Wave</span><strong>${prepSummary.bestWave || '—'}</strong></div>
+        <div class="progression-pill"><span>Salvaged Hulls</span><strong>${prepSummary.salvageTotal}</strong></div>
+        <div class="progression-pill"><span>Wingman</span><strong style="color:${prepSummary.wingmanColor ?? '#94a3b8'}">${prepSummary.wingmanName ?? 'None assigned'}</strong></div>
+      `;
+    }
+    if (legacyBonusEl) {
+      const unlockedBonuses = STARTING_BONUSES.filter((bonus) => this.legacyState.unlockedBonuses.includes(bonus.id));
+      legacyBonusEl.innerHTML = `
+        <div class="prep-card">
+          <strong>Starting Bonuses</strong>
+          <div class="muted">Activate up to ${MAX_ACTIVE_BONUSES}. Active: ${prepSummary.bonusesActive}/${MAX_ACTIVE_BONUSES} · Unlocked: ${prepSummary.bonusesUnlocked}</div>
+          ${unlockedBonuses.length === 0
+            ? '<p class="muted">No legacy bonuses unlocked yet. Push farther in endless mode to start building your codex.</p>'
+            : `<div class="tag-grid">${unlockedBonuses.map((bonus) => {
+                const active = this.legacyState.activeBonuses.includes(bonus.id);
+                const canEnable = active || canActivateBonus(this.legacyState, bonus.id);
+                return `<button class="tag-button ${active ? 'active' : ''}" data-bonus-toggle="${bonus.id}" ${canEnable ? '' : 'disabled'} title="${bonus.description}">${bonus.icon} ${bonus.displayName}</button>`;
+              }).join('')}</div>`}
+          <div class="muted" style="margin-top:6px">XP ${legacySummary.currentXp}/${legacySummary.xpForNext} · Best score ${legacySummary.bestScore || 0}</div>
+        </div>
+      `;
+    }
+    if (milestoneEl) {
+      const spotlightMilestones = MILESTONES.slice(0, 6);
+      milestoneEl.innerHTML = `
+        <div class="prep-card">
+          <strong>Milestones</strong>
+          <div class="muted">${prepSummary.milestonesCompleted}/${prepSummary.milestonesTotal} completed</div>
+          <div class="milestone-list">
+            ${spotlightMilestones.map((milestone) => {
+              const completed = isMilestoneCompleted(this.legacyState, milestone.id);
+              return `<div class="milestone-row ${completed ? 'completed' : ''}">
+                <span>${milestone.icon} ${milestone.displayName}</span>
+                <span>${completed ? '✓' : milestone.hint}</span>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>
+        <div class="prep-card">
+          <strong>Salvage Stats</strong>
+          <div class="milestone-list">
+            <div class="milestone-row"><span>Legendary hulls</span><span>${salvageStats.byRarity.legendary}</span></div>
+            <div class="milestone-row"><span>Epic hulls</span><span>${salvageStats.byRarity.epic}</span></div>
+            <div class="milestone-row"><span>Boss salvages</span><span>${salvageStats.bossCount}</span></div>
+            <div class="milestone-row"><span>Unique names</span><span>${salvageStats.uniqueNames}</span></div>
+          </div>
+        </div>
+      `;
+    }
+    if (salvageEl) {
+      salvageEl.innerHTML = sortedSalvage.length === 0
+        ? '<p class="muted">No salvaged enemy hulls yet. Endless elites and bosses can drop permanent ship designs.</p>'
+        : sortedSalvage.map((entry) => {
+            const rarity = RARITY_CONFIG[entry.rarity];
+            const isWingman = this.wingmanConfig?.blueprintId === entry.id;
+            return `
+              <div class="salvage-row" style="border-color:${rarity.color};box-shadow:inset 0 0 0 1px ${rarity.glow}">
+                <div>
+                  <strong style="color:${rarity.color}">${entry.name}</strong>
+                  <div class="muted">${rarity.label} · Wave ${entry.waveNumber}${entry.wasBoss ? ' · Boss' : ''}</div>
+                  <div class="muted">${entry.blueprint.modules.length} modules${entry.affixNames.length ? ` · ${entry.affixNames.join(', ')}` : ''}</div>
+                </div>
+                <div class="crew-controls salvage-actions">
+                  <button data-salvage-action="load" data-salvage-id="${entry.id}">Load</button>
+                  <button data-salvage-action="wingman" data-salvage-id="${entry.id}" ${isWingman ? 'disabled' : ''}>${isWingman ? 'Wingman Active' : 'Assign Wingman'}</button>
+                </div>
+              </div>
+            `;
+          }).join('');
     }
     if (statsEl) {
       statsEl.innerHTML = [
@@ -501,6 +631,35 @@ export class EditorScene {
         };
       });
     }
+    this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-bonus-toggle]').forEach((button) => {
+      button.onclick = () => {
+        const bonusId = button.dataset.bonusToggle;
+        if (!bonusId) return;
+        this.legacyState = toggleActiveBonus(this.legacyState, bonusId as typeof STARTING_BONUSES[number]['id']);
+        persistLegacyState(this.legacyState);
+        this.refreshInfo();
+      };
+    });
+    this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-salvage-action]').forEach((button) => {
+      button.onclick = () => {
+        const entryId = button.dataset.salvageId;
+        const action = button.dataset.salvageAction;
+        if (!entryId || !action) return;
+        const entry = this.salvageEntries.find((candidate) => candidate.id === entryId);
+        if (!entry) return;
+        if (action === 'load') {
+          this.blueprint = { ...cloneBlueprint(entry.blueprint), name: entry.name };
+          this.onBlueprintChange(cloneBlueprint(this.blueprint));
+          this.refreshScene();
+          return;
+        }
+        if (action === 'wingman') {
+          this.wingmanConfig = buildWingmanConfig(entry);
+          persistWingmanConfig(this.wingmanConfig);
+          this.refreshInfo();
+        }
+      };
+    });
     this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-module]').forEach((button) => {
       button.classList.toggle('active', button.dataset.module === this.selectedModuleId);
     });

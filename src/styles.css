@@ -101,14 +101,17 @@ button.primary:hover { filter: brightness(1.08); }
 }
 
 .crew-grid,
-.hangar-grid {
+.hangar-grid,
+.salvage-grid,
+.prep-grid {
   display: grid;
   gap: 8px;
   margin: 10px 0 12px;
 }
 
 .crew-row,
-.hangar-row {
+.hangar-row,
+.salvage-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -127,6 +130,58 @@ button.primary:hover { filter: brightness(1.08); }
 .crew-controls button {
   min-width: 34px;
   padding: 4px 8px;
+}
+
+.prep-card {
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(96, 165, 250, 0.16);
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.tag-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tag-button {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.86rem;
+}
+
+.tag-button.active {
+  background: linear-gradient(135deg, #7c3aed, #2563eb);
+  border-color: transparent;
+}
+
+.milestone-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.milestone-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: rgba(30, 41, 59, 0.45);
+  color: #cbd5e1;
+  font-size: 0.86rem;
+}
+
+.milestone-row.completed {
+  border: 1px solid rgba(74, 222, 128, 0.25);
+  background: rgba(20, 83, 45, 0.24);
+}
+
+.salvage-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .module-button.active {
@@ -294,7 +349,7 @@ ul {
 }
 
 @media (max-width: 900px) {
-  .module-grid, .stats-grid, .hud-grid { grid-template-columns: 1fr; }
+  .module-grid, .stats-grid, .hud-grid, .prep-grid { grid-template-columns: 1fr; }
   .panel, .compact-panel { width: calc(100vw - 24px); }
   .top-left, .top-right, .bottom-left, .bottom-right { left: 12px; right: 12px; }
   .top-right { top: auto; bottom: 12px; }
