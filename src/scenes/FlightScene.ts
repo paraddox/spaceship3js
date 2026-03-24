@@ -317,6 +317,13 @@ import {
   persistSalvageCollection,
 } from '../game/salvage';
 import {
+  extractCorruptedModule,
+  loadLineageLocker,
+  persistLineageLocker,
+  addToLocker,
+  type CorruptedModule,
+} from '../game/lineage';
+import {
   type WingmanState,
   type WingmanConfig,
   createWingmanState,
@@ -659,6 +666,9 @@ export class FlightScene {
   // Blueprint Scavenging (salvage system)
   private salvageCollection = { ...DEFAULT_SALVAGE_COLLECTION };
   private salvageRunCount = 0;
+  private lineageLocker: import('../game/lineage').LineageLocker = { modules: [] };
+  private lineageAnnouncement = '';
+  private lineageAnnouncementTimer = 0;
   private salvageAnnouncement = '';
   private salvageAnnouncementTimer = 0;
   private runSalvagedEntries: SalvagedBlueprint[] = [];
@@ -750,6 +760,7 @@ export class FlightScene {
       this.legacyState = loadLegacyState();
       this.salvageCollection = loadSalvageCollection();
       this.salvageRunCount = this.salvageCollection.totalAttempts;
+      this.lineageLocker = loadLineageLocker();
       this.mutagenState = loadMutagenState();
       this.mutagenStats = computeMutagenStats(this.mutagenState.mutations);
       // Deploy saved wingman if one is selected
@@ -876,6 +887,10 @@ export class FlightScene {
     if (this.salvageAnnouncementTimer > 0) {
       this.salvageAnnouncementTimer -= dt;
       if (this.salvageAnnouncementTimer <= 0) this.salvageAnnouncement = '';
+    }
+    if (this.lineageAnnouncementTimer > 0) {
+      this.lineageAnnouncementTimer -= dt;
+      if (this.lineageAnnouncementTimer <= 0) this.lineageAnnouncement = '';
     }
     if (this.mutagenAnnouncementTimer > 0) {
       this.mutagenAnnouncementTimer -= dt;
@@ -3833,6 +3848,7 @@ export class FlightScene {
       ${this.bossAnnouncement ? `<p style=\"font-size:1.2em;color:#ef4444;font-weight:700;text-shadow:0 0 10px rgba(239,68,68,0.6)\">${this.bossAnnouncement}</p>` : ''}
       ${this.bossWarning ? `<p style=\"font-size:1em;color:#f97316;font-weight:600;text-shadow:0 0 6px rgba(249,115,22,0.5)\">${this.bossWarning}</p>` : ''}
       ${this.salvageAnnouncement ? `<p style=\"font-size:1.05em;color:#c084fc;font-weight:600;text-shadow:0 0 8px rgba(192,132,252,0.5)\">${this.salvageAnnouncement}</p>` : ''}
+      ${this.lineageAnnouncement ? `<p style=\\"font-size:1.05em;color:#4ade80;font-weight:600;text-shadow:0 0 8px rgba(74,222,128,0.5)\\">${this.lineageAnnouncement}</p>` : ''}
       ${this.mutagenAnnouncement ? `<div style="color:#34d399;font-size:0.9em;text-align:center;text-shadow:0 0 8px #34d399">${this.mutagenAnnouncement}</div>` : ''}
       ${this.nemesisAnnouncement ? `<div style="color:#f472b6;font-size:0.96em;text-align:center;text-shadow:0 0 8px rgba(244,114,182,0.55)">${this.nemesisAnnouncement}</div>` : ''}
       ${this.crewOrderAnnouncement ? `<div style="color:#93c5fd;font-size:0.92em;text-align:center;text-shadow:0 0 8px rgba(147,197,253,0.55)">${this.crewOrderAnnouncement}</div>` : ''}
@@ -5667,6 +5683,33 @@ export class FlightScene {
       this.salvageAnnouncement = `🔧 Blueprint Salvaged: ${rc.label}${newTag}`;
       this.salvageAnnouncementTimer = 4;
       this.screenShake = createScreenShake(0.3, 0.2);
+    }
+    // Lineage: extract corrupted module from killed enemy
+    if (affixes && affixes.length > 0) {
+      const lAffixIds = affixes.map((a) => a.def.id);
+      const lAffixColors: Record<string, string> = {};
+      const lAffixDisplayNames: Record<string, string> = {};
+      for (const a of affixes) {
+        lAffixColors[a.def.id] = a.def.color;
+        lAffixDisplayNames[a.def.id] = a.def.displayName;
+      }
+      const corrupted = extractCorruptedModule({
+        enemyBlueprint: ship.blueprint,
+        getModuleDef: getModuleDefinition,
+        affixIds: lAffixIds,
+        affixColors: lAffixColors,
+        affixDisplayNames: lAffixDisplayNames,
+        isBoss: !!ship.isBoss,
+        waveNumber: this.currentWave,
+        rng: Math.random() * 100000,
+      });
+      if (corrupted) {
+        this.lineageLocker = addToLocker(this.lineageLocker, corrupted);
+        persistLineageLocker(this.lineageLocker);
+        const bossTag = corrupted.wasBoss ? ' 👑 Boss' : '';
+        this.lineageAnnouncement = `🧬 ${corrupted.displayName}${bossTag}`;
+        this.lineageAnnouncementTimer = 4;
+      }
     }
   }
 
