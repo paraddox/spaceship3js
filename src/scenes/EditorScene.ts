@@ -29,6 +29,15 @@ import {
 } from '../game/prep-bay';
 import { loadWingmanConfig, persistWingmanConfig, type WingmanConfig } from '../game/wingman';
 import { MODULE_UNLOCK_COSTS, canUnlockModule, isModuleUnlocked } from '../game/unlocks';
+import {
+  dismissEditorTips,
+  loadOnboardingState,
+  markSeenEditor,
+  shouldShowEditorTips,
+  getEditorTipMessage,
+  persistOnboardingState,
+  type OnboardingState,
+} from '../game/onboarding';
 import { PALETTE_GROUPS } from '../data/moduleCatalog';
 import { buildPreviewGroup, buildShipGroup } from '../rendering/shipFactory';
 import {
@@ -61,6 +70,8 @@ interface EditorSceneOptions {
   onDeleteFromHangar: (entryId: string) => void;
   onUnlockModule: (moduleId: string) => void;
   onLaunch: (blueprint: ShipBlueprint, encounterId: string) => void;
+  onboardingState?: OnboardingState;
+  onDismissOnboarding?: (state: OnboardingState) => void;
 }
 
 export class EditorScene {
@@ -74,6 +85,7 @@ export class EditorScene {
   private readonly onDeleteFromHangar: (entryId: string) => void;
   private readonly onUnlockModule: (moduleId: string) => void;
   private readonly onLaunch: (blueprint: ShipBlueprint, encounterId: string) => void;
+  private readonly onDismissOnboarding?: (state: OnboardingState) => void;
 
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.OrthographicCamera(-12, 12, 12, -12, 0.1, 100);
@@ -92,6 +104,7 @@ export class EditorScene {
   private salvageEntries: SalvagedBlueprint[] = [];
   private legacyState = loadLegacyState();
   private wingmanConfig: WingmanConfig | null = loadWingmanConfig();
+  private onboardingState: OnboardingState = loadOnboardingState();
   private selectedModuleId = 'core:bridge_scout';
   private previewRotation = 0;
   private hoveredHex: HexCoord | null = null;
@@ -142,7 +155,7 @@ export class EditorScene {
     }
   };
 
-  constructor({ renderer, mount, uiRoot, blueprint, selectedEncounterId, hangarEntries, progression, onBlueprintChange, onEncounterChange, onSaveToHangar, onLoadFromHangar, onDeleteFromHangar, onUnlockModule, onLaunch }: EditorSceneOptions) {
+  constructor({ renderer, mount, uiRoot, blueprint, selectedEncounterId, hangarEntries, progression, onBlueprintChange, onEncounterChange, onSaveToHangar, onLoadFromHangar, onDeleteFromHangar, onUnlockModule, onLaunch, onboardingState, onDismissOnboarding }: EditorSceneOptions) {
     this.renderer = renderer;
     this.mount = mount;
     this.uiRoot = uiRoot;
@@ -153,6 +166,7 @@ export class EditorScene {
     this.salvageEntries = loadSalvageCollection().entries;
     this.legacyState = loadLegacyState();
     this.wingmanConfig = loadWingmanConfig();
+    if (onboardingState) this.onboardingState = onboardingState;
     this.onBlueprintChange = onBlueprintChange;
     this.onEncounterChange = onEncounterChange;
     this.onSaveToHangar = onSaveToHangar;
@@ -160,6 +174,13 @@ export class EditorScene {
     this.onDeleteFromHangar = onDeleteFromHangar;
     this.onUnlockModule = onUnlockModule;
     this.onLaunch = onLaunch;
+    this.onDismissOnboarding = onDismissOnboarding;
+
+    // Mark editor as seen for onboarding
+    if (!this.onboardingState.hasSeenEditor) {
+      this.onboardingState = markSeenEditor(this.onboardingState);
+      persistOnboardingState(this.onboardingState);
+    }
 
     this.camera.position.set(0, 18, 0.001);
     this.camera.up.set(0, 0, -1);
@@ -246,6 +267,7 @@ export class EditorScene {
   private buildUi(): void {
     this.uiRoot.innerHTML = `
       <div class="overlay top-left panel editor-panel">
+        ${this.renderOnboardingBanner()}
         <h1>Spachip3JS</h1>
         <p class="muted">Godot spaceship plan translated into a browser-friendly editor + flight sandbox.</p>
         <div class="toolbar-row">
@@ -343,6 +365,7 @@ export class EditorScene {
     this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((button) => {
       button.addEventListener('click', async () => {
         const action = button.dataset.action;
+        if (action === 'dismiss-onboarding') { this.handleDismissOnboarding(); return; }
         if (action === 'rotate-left') this.previewRotation = normalizeRotation(this.previewRotation - 1);
         if (action === 'rotate-right') this.previewRotation = normalizeRotation(this.previewRotation + 1);
         if (action === 'clear') this.blueprint = { name: this.blueprint.name, crew: { ...this.blueprint.crew }, modules: [] };
@@ -412,6 +435,25 @@ export class EditorScene {
         this.onBlueprintChange(cloneBlueprint(this.blueprint));
       });
     }
+  }
+
+  private renderOnboardingBanner(): string {
+    if (!shouldShowEditorTips(this.onboardingState)) return '';
+    const message = getEditorTipMessage(this.onboardingState);
+    return `
+      <div class="onboarding-banner" id="onboarding-banner">
+        <div class="onboarding-content">${message}</div>
+        <button class="onboarding-dismiss" data-action="dismiss-onboarding">Got it</button>
+      </div>
+    `;
+  }
+
+  private handleDismissOnboarding(): void {
+    this.onboardingState = dismissEditorTips(this.onboardingState);
+    persistOnboardingState(this.onboardingState);
+    this.onDismissOnboarding?.(this.onboardingState);
+    const banner = this.uiRoot.querySelector('#onboarding-banner');
+    if (banner) banner.remove();
   }
 
   private refreshScene(): void {

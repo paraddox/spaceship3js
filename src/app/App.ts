@@ -17,6 +17,13 @@ import {
 } from '../game/progression';
 import { unlockModule } from '../game/unlocks';
 import { cloneBlueprint, createExampleBlueprint, parseBlueprint } from '../state/shipBlueprint';
+import {
+  loadOnboardingState,
+  markLaunchedFlight,
+  markCompletedEncounter,
+  persistOnboardingState,
+  type OnboardingState,
+} from '../game/onboarding';
 
 interface ActiveScene {
   update(dt: number): void;
@@ -40,6 +47,7 @@ export class App {
   private selectedEncounterId = 'gauntlet';
   private hangarEntries: HangarEntry[] = [];
   private progression: ProgressionState = DEFAULT_PROGRESSION_STATE;
+  private onboardingState: OnboardingState = loadOnboardingState();
   private activeScene: ActiveScene | null = null;
 
   constructor(root: HTMLElement) {
@@ -141,6 +149,8 @@ export class App {
       selectedEncounterId: this.selectedEncounterId,
       hangarEntries: this.hangarEntries,
       progression: this.progression,
+      onboardingState: this.onboardingState,
+      onDismissOnboarding: (state) => { this.onboardingState = state; },
       onBlueprintChange: (blueprint) => {
         this.blueprint = cloneBlueprint(blueprint);
         this.persistBlueprint();
@@ -176,6 +186,9 @@ export class App {
         this.selectedEncounterId = encounterId;
         this.persistBlueprint();
         this.persistEncounterId();
+        // Mark onboarding: player launched a flight
+        this.onboardingState = markLaunchedFlight(this.onboardingState);
+        persistOnboardingState(this.onboardingState);
         this.showFlight();
       },
     });
@@ -193,6 +206,9 @@ export class App {
       onReward: (encounterId, reward) => {
         this.progression = applyEncounterReward(this.progression, encounterId, reward);
         this.persistProgression();
+        // Mark onboarding: player completed an encounter
+        this.onboardingState = markCompletedEncounter(this.onboardingState);
+        persistOnboardingState(this.onboardingState);
       },
       onBack: (blueprint) => {
         this.blueprint = cloneBlueprint(blueprint);
