@@ -49,6 +49,29 @@ import {
   type NemesisState,
 } from '../game/nemesis';
 import {
+  type ArenaRiftActive,
+  type ArenaRiftState,
+  type ArenaRiftType,
+  type VoidCollapseState,
+  type GravityWellState,
+  type ShockwaveState,
+  type EmpStormState,
+  createRiftState,
+  getRiftDef,
+  getRiftArenaRadius,
+  getRiftGravityForce,
+  getRiftShockwaveForce,
+  isRiftEmpActive,
+  isOutsideVoidCollapse,
+  isRiftWave,
+  shouldTriggerRift,
+  updateRift,
+  getEmpCountdown,
+  rollRiftType,
+  getRiftType,
+  ARENA_RIFTS,
+} from '../game/arena-rift';
+import {
   advanceEncounterState,
   computeCoolingPerSecond,
   computePowerFactor,
@@ -639,6 +662,13 @@ export class FlightScene {
   /** Dash ghost ship reference (fires player weapons) */
   private crisisDashGhostShip: RuntimeShip | null = null;
 
+  // ── Arena Rift ────────────────────────────────────────────
+  private arenaRift: ArenaRiftActive | null = null;
+  private lastRiftType: ArenaRiftType | null = null;
+  private riftRingMesh: THREE.Mesh | null = null;
+  private riftWellMesh: THREE.Mesh | null = null;
+  private empFlashTimer = 0;
+
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
     this.keys.add(event.code);
@@ -747,6 +777,7 @@ export class FlightScene {
     this.updateAtmosphere(dt);
     this.updateWingman(dt);
     this.updateContracts(dt);
+    this.updateArenaRift(dt);
     // Tick crisis event timers
     if (this.crisisEliteKillBuffTimer > 0) {
       this.crisisEliteKillBuffTimer -= dt;
@@ -1177,6 +1208,23 @@ export class FlightScene {
     if (!wave) {
       wave = generateEndlessWave(waveNumber);
       this.waves.push(wave);
+    }
+
+    // ── Arena Rift management ──
+    if (this.isEndlessMode && shouldTriggerRift(waveNumber, this.arenaRift)) {
+      const riftType = rollRiftType(this.lastRiftType, Math.random());
+      this.lastRiftType = riftType;
+      const riftState = createRiftState(riftType, Math.random());
+      this.arenaRift = { rift: riftState, wavesRemaining: 2 };
+      const def = getRiftDef(riftType);
+      this.waveAnnouncement = `${def.icon} ${def.displayName} — ${def.description}`;
+      this.setupRiftVisuals(riftState);
+    } else if (this.arenaRift) {
+      this.arenaRift.wavesRemaining -= 1;
+      if (this.arenaRift.wavesRemaining <= 0) {
+        this.clearRiftVisuals();
+        this.arenaRift = null;
+      }
     }
 
     if (this.isEndlessMode && shouldSpawnNemesis(this.nemesisState, waveNumber)) {
@@ -2131,11 +2179,13 @@ export class FlightScene {
     if (isPlayerShip && rawDamage > 0) {
       this.recentDamageTime = this.elapsedEncounterSeconds;
     }
+    const empActive = isRiftEmpActive(this.arenaRift?.rift ?? null);
+    const effectiveShield = empActive ? 0 : ship.shield;
     const result: DamageResult = resolveDamage(
       rawDamage,
       damageType,
       armorPenetration,
-      ship.shield,
+      effectiveShield,
       ship.stats.armorRating,
       ship.stats.kineticBypass,
       ship.stats.energyVulnerability,
@@ -2798,8 +2848,9 @@ export class FlightScene {
   }
 
   private clampToArena(position: THREE.Vector3): void {
-    if (position.length() <= ARENA_RADIUS - 1) return;
-    position.setLength(ARENA_RADIUS - 1);
+    const maxR = this.getEffectiveArenaRadius() - 1;
+    if (position.length() <= maxR) return;
+    position.setLength(maxR);
   }
 
   private updateMinimap(): void {
@@ -3404,6 +3455,7 @@ export class FlightScene {
         ${this.isEndlessMode && this.nemesisState.active ? `<div><span>Nemesis</span><strong style="color:#f472b6">${getNemesisStatus(this.nemesisState.active)}</strong></div>` : ''}
         ${this.isEndlessMode && this.nearMissState.active ? `<div><span style="color:#fbbf24">💫 NEAR MISS</span><strong style="color:#fbbf24">${this.nearMissState.currentStreak}x streak</strong></div>` : ''}
         ${this.isEndlessMode && this.purchasedUpgrades.length > 0 ? `<div><span>Upgrades</span><strong>${this.purchasedUpgrades.length}</strong></div>` : ''}
+        ${this.arenaRift ? this.renderRiftHud() : ''}
       </div>
       <div class="ability-bar">
         ${this.renderAbilitySlot(this.player.abilities[0], '1', '🛡')}
@@ -5424,6 +5476,200 @@ export class FlightScene {
       nearMissBestStreak: this.nearMissState.bestStreak,
       grade: grade.letter,
     };
+  }
+
+  // ── Arena Rift Visuals ──────────────────────────────────────
+
+  private setupRiftVisuals(state: ArenaRiftState): void {
+    this.clearRiftVisuals();
+    if (state.kind === 'void_collapse') {
+      const geo = new THREE.RingGeometry(0.9 * state.currentRadius, state.currentRadius, 64);
+      const mat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(getRiftDef('void_collapse').color),
+        transparent: true,
+        opacity: 0.5,
+        side: THREE.DoubleSide,
+      });
+      this.riftRingMesh = new THREE.Mesh(geo, mat);
+      this.riftRingMesh.rotation.x = -Math.PI / 2;
+      this.riftRingMesh.position.y = 0.1;
+      this.scene.add(this.riftRingMesh);
+    } else if (state.kind === 'gravity_well') {
+      const geo = new THREE.SphereGeometry(0.8, 16, 16);
+      const mat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(getRiftDef('gravity_well').color),
+        transparent: true,
+        opacity: 0.7,
+      });
+      this.riftWellMesh = new THREE.Mesh(geo, mat);
+      this.riftWellMesh.position.set(state.wellX, 0.5, state.wellZ);
+      this.scene.add(this.riftWellMesh);
+    }
+  }
+
+  private clearRiftVisuals(): void {
+    if (this.riftRingMesh) {
+      this.scene.remove(this.riftRingMesh);
+      this.riftRingMesh.geometry.dispose();
+      (this.riftRingMesh.material as THREE.Material).dispose();
+      this.riftRingMesh = null;
+    }
+    if (this.riftWellMesh) {
+      this.scene.remove(this.riftWellMesh);
+      this.riftWellMesh.geometry.dispose();
+      (this.riftWellMesh.material as THREE.Material).dispose();
+      this.riftWellMesh = null;
+    }
+    this.empFlashTimer = 0;
+  }
+
+  private updateRiftVisuals(state: ArenaRiftState, dt: number): void {
+    // Void collapse: resize the ring
+    if (state.kind === 'void_collapse' && this.riftRingMesh) {
+      const r = state.currentRadius;
+      this.riftRingMesh.geometry.dispose();
+      this.riftRingMesh.geometry = new THREE.RingGeometry(0.9 * r, r, 64);
+      // Pulse opacity
+      const mat = this.riftRingMesh.material as THREE.MeshBasicMaterial;
+      mat.opacity = 0.35 + Math.sin(state.elapsed * 3) * 0.15;
+    }
+
+    // Gravity well: move with orbit
+    if (state.kind === 'gravity_well' && this.riftWellMesh) {
+      this.riftWellMesh.position.set(state.wellX, 0.5, state.wellZ);
+      const mat = this.riftWellMesh.material as THREE.MeshBasicMaterial;
+      mat.opacity = 0.5 + Math.sin(state.elapsed * 4) * 0.2;
+    }
+
+    // EMP flash timer
+    if (this.empFlashTimer > 0) {
+      this.empFlashTimer -= dt;
+    }
+  }
+
+  // ── Arena Rift Game Logic ───────────────────────────────────
+
+  /** Call once per frame in the main update loop. */
+  private updateArenaRift(dt: number): void {
+    if (!this.arenaRift) return;
+    const prev = this.arenaRift.rift;
+    const updated = updateRift(prev, dt);
+    this.arenaRift.rift = updated;
+    this.updateRiftVisuals(updated, dt);
+
+    // EMP: detect pulse transition for visual flash
+    if (updated.kind === 'emp_storm' && updated.shieldsDisabled && prev.kind === 'emp_storm' && !prev.shieldsDisabled) {
+      this.empFlashTimer = 0.3;
+    }
+
+    // Void collapse: damage ships outside safe zone
+    if (updated.kind === 'void_collapse') {
+      this.applyVoidCollapseDamage(updated);
+    }
+
+    // Gravity well: apply force to all ships
+    if (updated.kind === 'gravity_well') {
+      this.applyRiftGravityForces(updated, dt);
+    }
+
+    // Shockwave: apply force at wave front
+    if (updated.kind === 'shockwave') {
+      this.applyRiftShockwaveForces(updated, dt);
+    }
+  }
+
+  private applyVoidCollapseDamage(state: VoidCollapseState): void {
+    for (const ship of this.ships) {
+      if (ship.alive && isOutsideVoidCollapse(state, ship.position.x, ship.position.z)) {
+        this.applyDamage(ship, state.edgeDps / 60, 'energy', 0, 0);
+      }
+    }
+    if (isOutsideVoidCollapse(state, this.player.position.x, this.player.position.z)) {
+      this.applyDamage(this.player, state.edgeDps / 60, 'energy', 0, 0);
+    }
+  }
+
+  private applyRiftGravityForces(state: GravityWellState, dt: number): void {
+    const allShips = [...this.ships, this.player];
+    for (const ship of allShips) {
+      const force = getRiftGravityForce(state, ship.position.x, ship.position.z);
+      if (force) {
+        ship.position.x += force.fx * dt;
+        ship.position.z += force.fz * dt;
+        ship.velocity.x += force.fx * dt * 0.3;
+        ship.velocity.z += force.fz * dt * 0.3;
+      }
+    }
+    // Deflect projectiles
+    for (const proj of this.projectiles) {
+      if (!proj.active) continue;
+      const px = proj.mesh.position.x;
+      const pz = proj.mesh.position.z;
+      const force = getRiftGravityForce(state, px, pz);
+      if (force) {
+        proj.velocity.x += force.fx * dt * 2;
+        proj.velocity.z += force.fz * dt * 2;
+      }
+    }
+  }
+
+  private applyRiftShockwaveForces(state: ShockwaveState, dt: number): void {
+    if (!state.waveActive) return;
+    const allShips = [...this.ships, this.player];
+    for (const ship of allShips) {
+      const force = getRiftShockwaveForce(state, ship.position.x, ship.position.z);
+      if (force) {
+        ship.velocity.x += force.fx * dt;
+        ship.velocity.z += force.fz * dt;
+        ship.position.x += force.fx * dt * 0.5;
+        ship.position.z += force.fz * dt * 0.5;
+      }
+    }
+    // Push projectiles outward
+    for (const proj of this.projectiles) {
+      if (!proj.active) continue;
+      const px = proj.mesh.position.x;
+      const pz = proj.mesh.position.z;
+      const force = getRiftShockwaveForce(state, px, pz);
+      if (force) {
+        proj.velocity.x += force.fx * dt * 1.5;
+        proj.velocity.z += force.fz * dt * 1.5;
+      }
+    }
+  }
+
+  private renderRiftHud(): string {
+    if (!this.arenaRift) return '';
+    const rift = this.arenaRift.rift;
+    const def = getRiftDef(getRiftType(rift));
+    const color = def.color;
+    let detail = '';
+    switch (rift.kind) {
+      case 'void_collapse':
+        detail = `Radius: ${rift.currentRadius.toFixed(1)}`;
+        break;
+      case 'gravity_well':
+        detail = `Active`;
+        break;
+      case 'emp_storm': {
+        const cd = getEmpCountdown(rift);
+        if (rift.shieldsDisabled) {
+          detail = `⚡ SHIELDS DOWN ${Math.abs(cd ?? 0).toFixed(1)}s`;
+        } else {
+          detail = `Pulse in ${(cd ?? 0).toFixed(1)}s`;
+        }
+        break;
+      }
+      case 'shockwave':
+        detail = rift.waveActive ? `Expanding ${rift.currentWaveRadius.toFixed(0)}m` : `Next in ${(rift.waveInterval - rift.timeSinceLastWave).toFixed(1)}s`;
+        break;
+    }
+    return `<div><span style="color:${color}">${def.icon} ${def.displayName}</span><strong style="color:${color}">${detail}</strong></div>`;
+  }
+
+  /** Override arena clamp radius when void collapse is active. */
+  private getEffectiveArenaRadius(): number {
+    return getRiftArenaRadius(this.arenaRift?.rift ?? null);
   }
 }
 
