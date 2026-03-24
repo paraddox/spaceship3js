@@ -75,6 +75,10 @@ export function createWingmanState(): WingmanState {
   };
 }
 
+export function startWingmanRun(config: WingmanConfig | null): WingmanState {
+  return config ? deployWingman(createWingmanState(), config) : createWingmanState();
+}
+
 export function deployWingman(state: WingmanState, config: WingmanConfig): WingmanState {
   return {
     ...state,
@@ -111,6 +115,29 @@ export function updateWingmanTimers(state: WingmanState, dt: number): WingmanSta
     };
   }
   return { ...state, respawnTimer: newTimer };
+}
+
+export function getWingmanSpawnPoint(
+  playerX: number,
+  playerZ: number,
+  playerRotation: number,
+): { x: number; z: number; rotation: number } {
+  const offsetX = Math.sin(playerRotation + Math.PI * 0.4) * WINGMAN_FOLLOW_DISTANCE;
+  const offsetZ = Math.cos(playerRotation + Math.PI * 0.4) * WINGMAN_FOLLOW_DISTANCE;
+  return {
+    x: playerX + offsetX,
+    z: playerZ + offsetZ,
+    rotation: playerRotation,
+  };
+}
+
+export function recordWingmanDamage(state: WingmanState, damage: number): WingmanState {
+  if (damage <= 0) return state;
+  return { ...state, totalDamageDealt: state.totalDamageDealt + damage };
+}
+
+export function recordWingmanKill(state: WingmanState): WingmanState {
+  return { ...state, totalKills: state.totalKills + 1 };
 }
 
 // ── AI Behavior ─────────────────────────────────────────────

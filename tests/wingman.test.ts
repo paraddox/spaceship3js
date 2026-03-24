@@ -5,6 +5,10 @@ import {
   killWingman,
   updateWingmanTimers,
   computeWingmanAI,
+  startWingmanRun,
+  getWingmanSpawnPoint,
+  recordWingmanDamage,
+  recordWingmanKill,
   WINGMAN_RESPAWN_DELAY,
   WINGMAN_FOLLOW_DISTANCE,
   WINGMAN_ATTACK_RANGE,
@@ -29,6 +33,23 @@ describe('createWingmanState', () => {
     expect(state.totalKills).toBe(0);
     expect(state.hpFraction).toBe(1);
     expect(state.targetId).toBeNull();
+  });
+});
+
+describe('startWingmanRun', () => {
+  it('deploys immediately when a config is present', () => {
+    const state = startWingmanRun(TEST_CONFIG);
+    expect(state.active).toBe(true);
+    expect(state.config).toEqual(TEST_CONFIG);
+    expect(state.respawnTimer).toBe(0);
+    expect(state.totalKills).toBe(0);
+    expect(state.totalDamageDealt).toBe(0);
+  });
+
+  it('stays inactive when no config is assigned', () => {
+    const state = startWingmanRun(null);
+    expect(state.active).toBe(false);
+    expect(state.config).toBeNull();
   });
 });
 
@@ -97,6 +118,29 @@ describe('updateWingmanTimers', () => {
 });
 
 // ── AI Behavior ──────────────────────────────────────────────
+
+describe('getWingmanSpawnPoint', () => {
+  it('spawns at the player flank offset instead of a fixed world point', () => {
+    const spawn = getWingmanSpawnPoint(10, -4, Math.PI / 2);
+    const dist = Math.hypot(spawn.x - 10, spawn.z + 4);
+    expect(dist).toBeCloseTo(WINGMAN_FOLLOW_DISTANCE, 5);
+    expect(spawn.rotation).toBeCloseTo(Math.PI / 2, 5);
+  });
+});
+
+describe('wingman telemetry', () => {
+  it('records cumulative damage dealt', () => {
+    const state = recordWingmanDamage(startWingmanRun(TEST_CONFIG), 12.5);
+    expect(state.totalDamageDealt).toBeCloseTo(12.5, 5);
+  });
+
+  it('records kills without losing other state', () => {
+    const state = recordWingmanKill(recordWingmanDamage(startWingmanRun(TEST_CONFIG), 4));
+    expect(state.totalKills).toBe(1);
+    expect(state.totalDamageDealt).toBe(4);
+    expect(state.active).toBe(true);
+  });
+});
 
 describe('computeWingmanAI', () => {
   const BASE_INPUT = {

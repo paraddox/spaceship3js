@@ -34,6 +34,8 @@ export interface StartingBonusDef {
     kind: 'bonus_hp' | 'bonus_credits' | 'bonus_shield' | 'ability_cd_reduction' | 'heat_capacity' | 'dash_cd_reduction' | 'combo_window' | 'credit_percent';
     value: number;
   };
+  /** Whether this bonus must be reapplied after module rebuilds. */
+  persistsRebuild?: boolean;
 }
 
 export interface MilestoneDef {
@@ -109,6 +111,7 @@ export const STARTING_BONUSES: StartingBonusDef[] = [
     icon: '🛡️',
     description: '+15% max HP at run start',
     effect: { kind: 'bonus_hp', value: 15 },
+    persistsRebuild: true,
   },
   {
     id: 'quick_start',
@@ -137,6 +140,7 @@ export const STARTING_BONUSES: StartingBonusDef[] = [
     icon: '🔵',
     description: 'Start with a small shield (15 HP)',
     effect: { kind: 'bonus_shield', value: 15 },
+    persistsRebuild: true,
   },
   {
     id: 'combo_starter',
@@ -151,6 +155,7 @@ export const STARTING_BONUSES: StartingBonusDef[] = [
     icon: '❄️',
     description: '+20% heat capacity',
     effect: { kind: 'heat_capacity', value: 20 },
+    persistsRebuild: true,
   },
   {
     id: 'dash_master',
@@ -547,6 +552,13 @@ export function getActiveBonusEffects(legacy: LegacyState): StartingBonusDef['ef
     .map((id) => BONUS_BY_ID[id])
     .filter(Boolean)
     .map((b) => b.effect);
+}
+
+/** Effects that modify stat baselines and must be reapplied after module rebuilds. */
+export function getRebuildPersistentEffects(legacy: LegacyState): StartingBonusDef[] {
+  return legacy.activeBonuses
+    .map((id) => BONUS_BY_ID[id])
+    .filter((b) => b?.persistsRebuild);
 }
 
 /** Returns the credit percentage boost from active bonuses (e.g. 10 for +10%). */

@@ -225,8 +225,10 @@ function seededRandom(seed: number): number {
 }
 
 function computeEnemyCount(waveNumber: number, tier: DifficultyTier): number {
-  // Boss waves have fewer, tougher enemies
-  if (waveNumber % 5 === 0) return 1 + Math.floor(waveNumber / 15);
+  // Boss waves are single scripted encounters. Later difficulty should come
+  // from the boss itself getting stronger, not from spawning extra boss-grade
+  // ships that the single boss controller cannot drive coherently.
+  if (waveNumber % 5 === 0) return 1;
 
   // Scale count with wave number within tier bounds
   const waveScale = Math.min(1, (waveNumber - tier.minWave) / 12);
@@ -301,7 +303,7 @@ export function generateEndlessWave(waveNumber: number): EncounterWave {
     waveName = `${tier.tierLabel} ${waveNumber}`;
   }
 
-  return { name: waveName, enemies, hazards: generateRandomHazards(waveNumber, 16) };
+  return { name: waveName, enemies, hazards: generateRandomHazards(waveNumber, 18) };
 }
 
 /**

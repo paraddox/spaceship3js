@@ -152,11 +152,9 @@ export function applyShipHazardCollision(
     return { ...zero, pushX: nx * overlap, pushZ: nz * overlap };
   }
 
-  // Shield conduit: restore shields with per-ship cooldown
+  // Shield conduit: continuous shield restoration while inside, draining charge
   if (hazard.kind === 'shield_conduit') {
     if (hazard.charge < 0.05) return zero;
-    const lastUse = hazard.lastShipInside.get(shipId) ?? 0;
-    if (now - lastUse < CONDUIT_COOLDOWN) return zero;
 
     const restoreAmount = hazard.shieldRestore * dt;
     // Consume charge proportional to restoration

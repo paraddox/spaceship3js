@@ -132,13 +132,14 @@ describe('hazard system', () => {
       expect(result.damageTaken).toBe(0);
     });
 
-    it('shield conduit has per-ship cooldown', () => {
+    it('shield conduit restores continuously while inside', () => {
       const h = createHazardState({ kind: 'shield_conduit', x: 0, z: 0, radius: 2 });
       const r1 = applyShipHazardCollision(h, 'ship-1', 0, 0, 0.5, 0.016, 10);
       expect(r1.shieldRestored).toBeGreaterThan(0);
 
-      const r2 = applyShipHazardCollision(h, 'ship-1', 0, 0, 0.5, 0.016, 10);
-      expect(r2.shieldRestored).toBe(0);
+      // Continuous restoration — no per-ship cooldown between ticks
+      const r2 = applyShipHazardCollision(h, 'ship-1', 0, 0, 0.5, 0.016, 10.016);
+      expect(r2.shieldRestored).toBeGreaterThan(0);
     });
 
     it('depleted conduit does not restore', () => {

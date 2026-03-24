@@ -129,6 +129,7 @@ import {
   lastStandBonuses,
   bountyHunterActive,
   chainReactionActive,
+  orbitShieldActive,
 } from '../game/mutators';
 import {
   type RunStats,
@@ -227,7 +228,7 @@ import {
   computeLegacyXp,
   getLegacySummary,
   getActiveBonusEffects,
-  getStartingBonusDef,
+  getRebuildPersistentEffects,
   getCreditPercentBoost,
   STARTING_BONUSES,
   MILESTONES,
@@ -266,15 +267,16 @@ import {
   type WingmanState,
   type WingmanConfig,
   createWingmanState,
-  deployWingman,
+  startWingmanRun,
   killWingman,
   updateWingmanTimers,
   computeWingmanAI,
+  getWingmanSpawnPoint,
+  recordWingmanDamage,
+  recordWingmanKill,
   WINGMAN_FIRE_RATE_MULT,
   WINGMAN_DAMAGE_MULT,
-  WINGMAN_RESPAWN_DELAY,
   loadWingmanConfig,
-  persistWingmanConfig,
 } from '../game/wingman';
 import {
   playBossPhaseTransition,
@@ -306,7 +308,6 @@ import {
   hasMutations,
   hasDeathExplosion,
   getDeathExplosionDamage,
-  getHpRegenRate,
   MAX_ESSENCE_SLOTS,
 } from '../game/mutagen';
 import {
@@ -403,6 +404,8 @@ interface RuntimeShip {
   affixArmorBonus?: number;
   /** Whether this ship is a boss (endless mode boss waves). */
   isBoss?: boolean;
+  /** Boss HP scaling applied at spawn so rebuilds can preserve it. */
+  bossHpMult?: number;
   /** Whether this ship is a recurring nemesis. */
   isNemesis?: boolean;
   /** Persistent nemesis profile ID, if applicable. */
@@ -424,6 +427,9 @@ interface Projectile {
   target: RuntimeShip | null;
   focusTargetId?: string;
   focusDamageMult?: number;
+  ownerId?: string;
+  ownerIsWingman?: boolean;
+  nebulaBoosted?: boolean;
   active: boolean;
 }
 
@@ -509,6 +515,11 @@ export class FlightScene {
 
   // Upgrade shop
   private upgradeStats: LiveUpgradeStats = defaultLiveUpgradeStats();
+
+  /** Upgrade stats with mutator stat mods applied. Use this for all reads. */
+  private get effectiveStats(): LiveUpgradeStats {
+    return applyMutatorStatMods(this.upgradeStats, this.activeMutators);
+  }
   private purchasedUpgrades: PurchasedUpgrade[] = [];
   private shopOpen = false;
   private shopOptions: UpgradeDef[] = [];
@@ -638,7 +649,7 @@ export class FlightScene {
       if (savedWingman) {
         const entry = this.salvageCollection.entries.find((e) => e.id === savedWingman.blueprintId);
         if (entry) {
-          this.wingmanState = deployWingman(createWingmanState(), savedWingman);
+          this.wingmanState = startWingmanRun(savedWingman);
         }
       }
     }
@@ -680,8 +691,8 @@ export class FlightScene {
     this.updateThrustTrails(dt);
     this.updateScreenShake(dt);
     this.coolShips(dt);
-    this.updateHazards(enemyDt);
-    this.updateShipHazards(enemyDt);
+    this.updateHazards(dt);
+    this.updateShipHazards(dt);
     this.updatePickups(dt);
     this.updatePlayerBuffs(dt);
     this.updateCombo(dt);
@@ -1006,9 +1017,9 @@ export class FlightScene {
     this.crisisEliteKillBuffTimer = 0;
     this.crisisDashGhostTimer = 0;
     this.crisisDashGhostShip = null;
-    // Reset wingman for new run (respawn if was deployed)
+    // Reset wingman for new run and redeploy immediately if one is assigned.
     if (this.wingmanState.config) {
-      this.wingmanState = { ...createWingmanState(), config: this.wingmanState.config };
+      this.wingmanState = startWingmanRun(this.wingmanState.config);
       this.wingmanShip = null;
       this.wingmanFireTimer = 0;
     }
@@ -1024,13 +1035,15 @@ export class FlightScene {
     // Apply legacy starting bonuses in endless mode
     if (this.isEndlessMode) {
       this.applyLegacyBonuses();
+      this.comboState.timeoutBonus = this.legacyComboWindowBonus;
     }
     // Apply permanent mutagen stats
     const mutagenMods = computeMutagenStats(this.mutagenState.mutations);
-    this.player.stats.maxHp = Math.round(this.player.stats.maxHp * mutagenMods.maxHpMultiplier);
-    this.player.stats.shieldStrength = Math.round(this.player.stats.shieldStrength * mutagenMods.shieldMultiplier);
-    this.player.stats.thrust *= mutagenMods.thrustMultiplier;
-    this.player.stats.armorRating += mutagenMods.armorBonus;
+    const mutagenStatMult = getMutagenStatMult(this.crisisState.activeEffects);
+    this.player.stats.maxHp = Math.round(this.player.stats.maxHp * mutagenMods.maxHpMultiplier * mutagenStatMult);
+    this.player.stats.shieldStrength = Math.round(this.player.stats.shieldStrength * mutagenMods.shieldMultiplier * mutagenStatMult);
+    this.player.stats.thrust *= mutagenMods.thrustMultiplier * mutagenStatMult;
+    this.player.stats.armorRating += mutagenMods.armorBonus * mutagenStatMult;
     this.player.maxShield = this.player.stats.shieldStrength;
     this.player.shield = Math.min(this.player.shield, this.player.maxShield);
     this.player.hp = Math.min(this.player.hp, this.player.stats.maxHp);
@@ -1097,6 +1110,7 @@ export class FlightScene {
       if (bossWave) {
         runtimeShip.isBoss = true;
         const hpMult = getBossHpMultiplier(waveNumber);
+        runtimeShip.bossHpMult = hpMult;
         runtimeShip.hp *= hpMult;
         runtimeShip.stats.maxHp *= hpMult;
         // Scale module HP to match
@@ -1265,6 +1279,17 @@ export class FlightScene {
     }
 
     this.player.position.addScaledVector(this.player.velocity, dt);
+
+    // Nebula slow: reduce velocity when player is inside a damage nebula
+    for (const hazard of this.hazards) {
+      if (hazard.kind !== 'damage_nebula') continue;
+      const dist = Math.hypot(this.player.position.x - hazard.x, this.player.position.z - hazard.z);
+      if (dist < hazard.radius + this.player.radius * 0.45) {
+        this.player.velocity.multiplyScalar(0.92);
+        break;
+      }
+    }
+
     this.clampToArena(this.player.position);
 
     if (this.fireHeld) {
@@ -1284,16 +1309,19 @@ export class FlightScene {
     this.tryCrewOrder('tactician_link');
 
     // ── Dash (Space) ──
-    this.dashState = updateDash(this.dashState, dt);
+    // Move dash input before movement so the first frame of dash is not wasted
     if (this.keys.has('Space') && canDash(this.dashState)) {
       const shipRot = this.player.group.rotation.y;
+      const crisisDashMult = getDashCooldownMult(this.crisisState.activeEffects);
+      const effectiveReduction = 1 - (1 - this.effectiveStats.dashCooldownReduction) * crisisDashMult;
       this.dashState = startDash(
         this.dashState, forward.x, forward.z, right.x, right.z,
-        shipRot, this.upgradeStats.dashCooldownReduction + getDashCooldownMult(this.crisisState.activeEffects),
+        shipRot, effectiveReduction,
       );
       if (this.isEndlessMode) this.runStats.dashCount += 1;
       this.particles.emit(ParticleSystem.dashBurst(this.player.position));
     }
+    this.dashState = updateDash(this.dashState, dt);
 
     // ── Overdrive (V) ──
     if (this.keys.has('KeyV') && canActivateOverdrive(this.overdriveState)) {
@@ -1316,6 +1344,36 @@ export class FlightScene {
     if (!this.keys.has(keyCode)) return;
     if (activateAbility(this.player.abilities, abilityId)) {
       this.runStats.abilityActivations += 1;
+
+      // Crisis: Meltdown Protocol — overcharge costs HP and gets enhanced duration/damage
+      if (abilityId === 'overcharge') {
+        const hpCost = getOverchargeHpCost(this.crisisState.activeEffects);
+        if (hpCost > 0) {
+          const costAmount = this.player.stats.maxHp * hpCost;
+          this.player.hp = Math.max(1, this.player.hp - costAmount);
+          this.particles.emit(ParticleSystem.hitSpark(this.player.position, '#f59e0b'));
+        }
+        // Extend overcharge duration by crisis bonus
+        const durationBonus = getOverchargeDurationBonus(this.crisisState.activeEffects);
+        if (durationBonus > 0) {
+          const ability = this.player.abilities.find((a) => a.def.id === 'overcharge');
+          if (ability) {
+            ability.activeRemaining += durationBonus;
+          }
+        }
+      }
+
+      // Crisis: Containment Override — shield bubble on ability activation
+      const shieldBubble = getAbilityShieldBubble(this.crisisState.activeEffects);
+      if (shieldBubble > 0) {
+        this.player.shield = Math.min(
+          this.player.maxShield + shieldBubble,
+          this.player.shield + shieldBubble,
+        );
+        this.player.maxShield = Math.max(this.player.maxShield, this.player.shield);
+        this.particles.emit(ParticleSystem.shieldAbsorb(this.player.position, '#a78bfa'));
+      }
+
       // Handle emergency repair immediately
       if (abilityId === 'emergency_repair') {
         const target = getRepairTarget(this.player.moduleStates);
@@ -1506,12 +1564,15 @@ export class FlightScene {
       const baseDrift = Math.sin(performance.now() * 0.0008 + ei * 2.7) * 1.2;
       const lateralThrust = (decision.lateralBias * 2.5 + baseDrift);
 
+      const bossPhaseMult = enemy.isBoss && this.bossShip?.id === enemy.id && this.bossAI
+        ? getBossPhaseMultipliers(this.bossAI)
+        : null;
       const effectiveThrust = getEffectiveThrust(
         Math.max(3.5, enemy.stats.thrust / 80),
         enemy.powerFactor,
         enemy.heat,
         enemy.stats.heatCapacity,
-      ) * (isAfterburning(enemy.abilities) ? 1.8 : 1) * (enemy.affixThrustMult ?? 1);
+      ) * (isAfterburning(enemy.abilities) ? 1.8 : 1) * (enemy.affixThrustMult ?? 1) * (bossPhaseMult?.speedMult ?? 1);
 
       // Hazard avoidance steering
       const seekConduit = ctx.ownHpRatio < 0.5 && ctx.ownShieldRatio < 0.3;
@@ -1559,18 +1620,23 @@ export class FlightScene {
     // Mutator: Last Stand fire rate boost
     const playerCrew = this.player.blueprint.crew;
     const focusTargetId = ship.team === 'player' ? getCrewOrderTargetId(this.crewOrdersState) : null;
+    const bossPhaseMult = ship.team === 'enemy' && ship.isBoss && this.bossShip?.id === ship.id && this.bossAI
+      ? getBossPhaseMultipliers(this.bossAI)
+      : null;
     const lastStand = ship.team === 'player' ? lastStandBonuses(this.activeMutators, this.player.hp / Math.max(1, this.player.stats.maxHp)) : { damageMult: 1, fireRateMult: 1 };
     const crisisFireRate = this.crisisEliteKillBuffTimer > 0 ? getEliteKillFireRateBuff(this.crisisState.activeEffects) : 1;
+    const crisisMutagenStatMult = getMutagenStatMult(this.crisisState.activeEffects);
     const cadenceBuff = ship.team === 'player'
       ? getCadenceMultiplier(this.playerBuffs)
-        * this.upgradeStats.fireRateMultiplier
+        * this.effectiveStats.fireRateMultiplier
         * getOverdriveFireRateMult(this.overdriveState)
         * lastStand.fireRateMult
         * this.mutagenStats.fireRateMultiplier
+        * crisisMutagenStatMult
         * crisisFireRate
         * getGunnerCadenceMultiplier(this.crewOrdersState, playerCrew)
         * getTacticianCadenceMultiplier(this.crewOrdersState, playerCrew)
-      : (ship.affixFireRateMult ?? 1);
+      : (ship.affixFireRateMult ?? 1) * (bossPhaseMult?.fireRateMult ?? 1);
     const effectiveCadence = getEffectiveWeaponCadence(
       Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
       ship.powerFactor,
@@ -1584,20 +1650,26 @@ export class FlightScene {
     const crisisDamage = this.crisisEliteKillBuffTimer > 0 ? getEliteKillDamageBuff(this.crisisState.activeEffects) : 1;
     const buffMultiplier = ship.team === 'player'
       ? getDamageMultiplier(this.playerBuffs)
-        * this.upgradeStats.damageMultiplier
+        * this.effectiveStats.damageMultiplier
         * getOverdriveDamageMult(this.overdriveState)
+        * getOverchargeDamageMult(this.crisisState.activeEffects)
         * lastStand.damageMult
         * momentumMult
         * this.mutagenStats.damageMultiplier
+        * crisisMutagenStatMult
         * crisisDamage
-      : (ship.affixDamageMult ?? 1);
+      : (ship.affixDamageMult ?? 1) * (bossPhaseMult?.damageMult ?? 1);
     const focusDamageMult = ship.team === 'player'
       ? getGunnerFocusDamageMultiplier(this.crewOrdersState, playerCrew, focusTargetId)
       : 1;
-    const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier);
+    const wingmanDamageMult = ship.isWingman ? WINGMAN_DAMAGE_MULT : 1;
+    const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier * wingmanDamageMult);
 
     if (weapon.archetype === 'beam') {
-      this.fireBeam(ship, normalizedDirection, weapon, damage, focusTargetId, focusDamageMult);
+      this.fireBeam(ship, normalizedDirection, weapon, damage, focusTargetId, focusDamageMult, {
+        ownerId: ship.id,
+        isWingman: !!ship.isWingman,
+      });
       playBeam();
       ship.cooldown = weapon.cooldown;
       ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + weapon.heat);
@@ -1623,9 +1695,11 @@ export class FlightScene {
     projectile.target = weapon.archetype === 'missile' ? this.findNearestEnemy(ship) : null;
     projectile.focusTargetId = focusTargetId ?? undefined;
     projectile.focusDamageMult = focusTargetId ? focusDamageMult : undefined;
+    projectile.ownerId = ship.id;
+    projectile.ownerIsWingman = !!ship.isWingman;
     const crisisEnemyProjMult = getEnemyProjectileSpeedMult(this.crisisState.activeEffects);
     projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(
-      (weapon.projectileSpeed + (ship.team === 'player' ? this.upgradeStats.projectileSpeedBonus : 0))
+      (weapon.projectileSpeed + (ship.team === 'player' ? this.effectiveStats.projectileSpeedBonus : 0))
       * (ship.team === 'enemy' ? crisisEnemyProjMult : 1), 8)));
     projectile.mesh.visible = true;
     projectile.mesh.position.copy(computeProjectileSpawnPosition(ship.position, spreadDirection, ship.radius));
@@ -1674,11 +1748,14 @@ export class FlightScene {
       }
       if (hitAsteroid) continue;
 
-      // Hazard boost: projectiles passing through nebulas get 15% damage boost
-      for (const hazard of this.hazards) {
-        if (checkProjectileNebulaBoost(projectile.mesh.position.x, projectile.mesh.position.z, hazard)) {
-          projectile.damage *= 1.15;
-          break; // only apply once
+      // Hazard boost: projectiles passing through nebulas get 15% damage boost (once per lifetime)
+      if (!projectile.nebulaBoosted) {
+        for (const hazard of this.hazards) {
+          if (checkProjectileNebulaBoost(projectile.mesh.position.x, projectile.mesh.position.z, hazard)) {
+            projectile.damage *= 1.15;
+            projectile.nebulaBoosted = true;
+            break;
+          }
         }
       }
 
@@ -1687,8 +1764,12 @@ export class FlightScene {
         if (!drone.state.active || drone.state.team === projectile.team) continue;
         const distance = Math.hypot(projectile.mesh.position.x - drone.state.x, projectile.mesh.position.z - drone.state.z);
         if (distance <= 0.45) {
-          drone.state = applyDroneDamage(drone.state, projectile.damage);
-          drone.mesh.visible = drone.state.active;
+          // Orbit Shield: player drones absorb interceptions harmlessly
+          const isShieldedDrone = drone.state.team === 'player' && orbitShieldActive(this.activeMutators);
+          if (!isShieldedDrone) {
+            drone.state = applyDroneDamage(drone.state, projectile.damage);
+            drone.mesh.visible = drone.state.active;
+          }
           this.deactivateProjectile(projectile);
           this.waveAnnouncement = `${projectile.team === 'player' ? 'Enemy drone hit' : 'Support drone hit'}`;
           hit = true;
@@ -1708,7 +1789,10 @@ export class FlightScene {
           const impactDamage = projectile.focusTargetId && ship.id === projectile.focusTargetId
             ? projectile.damage * (projectile.focusDamageMult ?? 1)
             : projectile.damage;
-          this.applyDamage(ship, impactDamage, projectile.damageType, projectile.armorPenetration, hitAngle);
+          this.applyDamage(ship, impactDamage, projectile.damageType, projectile.armorPenetration, hitAngle, {
+            ownerId: projectile.ownerId,
+            isWingman: projectile.ownerIsWingman,
+          });
           this.deactivateProjectile(projectile);
           break;
         }
@@ -1734,6 +1818,13 @@ export class FlightScene {
       }
 
       drone.state = advanceDrone(drone.state, { x: owner.position.x, z: owner.position.z }, dt);
+
+      // Orbit Shield: player drones orbit 40% closer (applied once at drone init,
+      // but re-checked here in case mutator was acquired mid-combat)
+      if (owner.team === 'player' && orbitShieldActive(this.activeMutators)) {
+        const baseRadius = 1.3 + (this.drones.indexOf(drone)) * 0.45;
+        drone.state.orbitRadius = baseRadius * 0.6;
+      }
 
       if (!drone.state.active) {
         drone.mesh.visible = false;
@@ -1762,7 +1853,10 @@ export class FlightScene {
             * (owner.team === 'player'
               ? getTacticianDroneDamageMultiplier(this.crewOrdersState, this.player.blueprint.crew, victim.id)
               : 1);
-          this.applyDamage(victim, droneDamage, 'energy', 0, hitAngle);
+          this.applyDamage(victim, droneDamage, 'energy', 0, hitAngle, {
+            ownerId: owner.id,
+            isWingman: !!owner.isWingman,
+          });
           drone.state.cooldown = 1 / drone.state.fireRate;
           this.waveAnnouncement = `${owner.team === 'player' ? 'Support drones engaging' : 'Enemy drones attacking'}`;
         }
@@ -1796,6 +1890,7 @@ export class FlightScene {
     damage: number,
     focusTargetId: string | null,
     focusDamageMult: number,
+    source?: { ownerId?: string; isWingman?: boolean },
   ): void {
     let bestTarget: RuntimeShip | null = null;
     let bestDistance = Infinity;
@@ -1820,24 +1915,32 @@ export class FlightScene {
       const beamDamage = focusTargetId && bestTarget.id === focusTargetId
         ? damage * focusDamageMult
         : damage;
-      this.applyDamage(bestTarget, beamDamage * 0.85, weapon.damageType as DamageType, weapon.armorPenetration, hitAngle);
+      this.applyDamage(bestTarget, beamDamage * 0.85, weapon.damageType as DamageType, weapon.armorPenetration, hitAngle, source);
       this.spawnBeamVisual(ship.position, bestTarget.position, ship.team);
       this.spawnImpactVisual(bestTarget.position, ship.team === 'player' ? '#5eead4' : '#fca5a5');
       this.waveAnnouncement = `${ship.team === 'player' ? 'Beam strike' : 'Enemy beam'} connected`;
     }
   }
 
-  private applyDamage(ship: RuntimeShip, rawDamage: number, damageType: DamageType, armorPenetration: number, hitAngle: number): void {
+  private applyDamage(
+    ship: RuntimeShip,
+    rawDamage: number,
+    damageType: DamageType,
+    armorPenetration: number,
+    hitAngle: number,
+    source?: { ownerId?: string; isWingman?: boolean },
+  ): void {
+    const isPlayerShip = ship.id === this.player.id;
     // Player is invulnerable during dash
-    if (ship.team === 'player' && isInvulnerable(this.dashState)) return;
+    if (isPlayerShip && isInvulnerable(this.dashState)) return;
     // Crisis: Phase Shift — player takes more damage
-    if (ship.team === 'player' && getDamageTakenMult(this.crisisState.activeEffects) > 1) {
+    if (isPlayerShip && getDamageTakenMult(this.crisisState.activeEffects) > 1) {
       rawDamage *= getDamageTakenMult(this.crisisState.activeEffects);
     }
     // Boss is invulnerable during phase transitions
     if (ship.isBoss && this.bossAI && !isBossVulnerable(this.bossAI)) return;
     // Track player damage time for music intensity
-    if (ship.team === 'player' && rawDamage > 0) {
+    if (isPlayerShip && rawDamage > 0) {
       this.recentDamageTime = this.elapsedEncounterSeconds;
     }
     const result: DamageResult = resolveDamage(
@@ -1855,8 +1958,27 @@ export class FlightScene {
     playHit();
     // Run stat tracking
     if (this.isEndlessMode) {
-      if (ship.team === 'player') this.runStats.damageTaken += result.hullDamage;
+      if (isPlayerShip) this.runStats.damageTaken += result.hullDamage;
       else this.runStats.damageDealt += result.hullDamage;
+    }
+    if (source?.isWingman && ship.team === 'enemy' && result.hullDamage > 0) {
+      this.wingmanState = recordWingmanDamage(this.wingmanState, result.hullDamage);
+    }
+
+    // Thorns: reflect a fraction of damage taken back to attackers hitting the player
+    if (isPlayerShip && result.hullDamage > 0) {
+      const reflectFrac = thornsReflectFraction(this.activeMutators);
+      if (reflectFrac > 0 && source?.ownerId) {
+        const attacker = this.ships.find((s) => s.id === source.ownerId && s.alive);
+        if (attacker && attacker.team === 'enemy') {
+          const reflected = Math.max(1, Math.round(result.hullDamage * reflectFrac));
+          this.applyDamage(attacker, reflected, 'energy', 0, Math.atan2(
+            attacker.position.z - ship.position.z,
+            attacker.position.x - ship.position.x,
+          ));
+          this.particles.emit(ParticleSystem.hitSpark(ship.position, '#fb923c'));
+        }
+      }
     }
 
     if (result.shieldAbsorbed > 0) {
@@ -1871,8 +1993,8 @@ export class FlightScene {
         this.particles.emit(ParticleSystem.hitSpark(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185'));
       }
 
-      // Screen shake when player takes hull damage
-      if (ship.team === 'player' && !this.screenShake) {
+      // Screen shake when the real player takes hull damage
+      if (isPlayerShip && !this.screenShake) {
         const shakeIntensity = Math.min(0.6, result.hullDamage / ship.stats.maxHp * 3);
         if (shakeIntensity > 0.05) {
           this.screenShake = createScreenShake(shakeIntensity, 0.25);
@@ -1885,6 +2007,11 @@ export class FlightScene {
       const survivingIds = new Set(ship.moduleStates.filter((m) => !m.destroyed).map((m) => m.instanceId));
       const newRawStats = computeStatsFromSurviving(ship.blueprint, survivingIds);
       ship.stats = applyCrewModifiers(newRawStats, ship.blueprint.crew);
+      if (ship.isBoss && ship.bossHpMult) {
+        ship.stats.maxHp *= ship.bossHpMult;
+      }
+      this.reapplyLegacyOnRebuild(ship);
+      this.reapplyMutagenOnRebuild(ship);
       ship.powerFactor = computePowerFactor(ship.stats.powerOutput, ship.stats.powerDemand);
       ship.maxShield = ship.stats.shieldStrength;
       ship.shield = Math.min(ship.shield, ship.maxShield);
@@ -1916,10 +2043,13 @@ export class FlightScene {
       ship.alive = false;
       ship.group.visible = false;
       playExplosion();
-      this.spawnExplosionVisual(ship.position, ship.team === 'player' ? '#fca5a5' : '#fb7185');
-      // Particle death explosion
-      for (const config of ParticleSystem.deathExplosion(ship.position)) {
-        this.particles.emit(config);
+      this.spawnExplosionVisual(ship.position, ship.team === 'player' ? '#fca5a5' : '#fb923c');
+      // Particle death explosion (skip for player with explosive mutagen — that path has its own emit)
+      const playerHasDeathExplosion = isPlayerShip && hasDeathExplosion(this.mutagenState.mutations);
+      if (!playerHasDeathExplosion) {
+        for (const config of ParticleSystem.deathExplosion(ship.position)) {
+          this.particles.emit(config);
+        }
       }
       // Affix: death explosion — damages nearby ships
       this.handleAffixExplosion(ship);
@@ -1949,13 +2079,13 @@ export class FlightScene {
           }
         }
       }
-      // Bigger screen shake for player death
-      if (ship.team === 'player') {
+      // Bigger screen shake for actual player death
+      if (isPlayerShip) {
         this.resolveNemesisOnPlayerDeath();
         this.screenShake = createScreenShake(0.8, 0.5);
         // Mutagen: death explosion
         if (hasDeathExplosion(this.mutagenState.mutations)) {
-          const dmg = getDeathExplosionDamage(this.mutagenState.mutations);
+          const dmg = Math.round(getDeathExplosionDamage(this.mutagenState.mutations) * getMutagenStatMult(this.crisisState.activeEffects));
           for (const enemy of this.ships) {
             if (!enemy.alive || enemy.team !== 'enemy') continue;
             const dist = this.player.position.distanceTo(enemy.position);
@@ -1974,6 +2104,9 @@ export class FlightScene {
       // Track kills in endless mode
       if (this.isEndlessMode && ship.team === 'enemy') {
         this.endlessTotalKills += 1;
+        if (source?.isWingman) {
+          this.wingmanState = recordWingmanKill(this.wingmanState);
+        }
         // Boss kill tracking
         if (ship.isBoss) {
           this.runStats.bossKills += 1;
@@ -2172,10 +2305,22 @@ export class FlightScene {
         : 1;
       const cooling = computeCoolingPerSecond(Math.max(2, ship.stats.cooling * 80 * engineerCooling), ship.powerFactor);
       ship.heat = Math.max(0, ship.heat - cooling * dt);
+      // Check if ship is inside a nebula — drain shields at 2x rate inside nebula
+      let shieldDrainMult = 1;
+      if (ship.maxShield > 0) {
+        for (const hazard of this.hazards) {
+          if (hazard.kind !== 'damage_nebula') continue;
+          const dist = Math.hypot(ship.position.x - hazard.x, ship.position.z - hazard.z);
+          if (dist < hazard.radius + ship.radius * 0.45) {
+            shieldDrainMult = 2; // Nebula doubles shield drain
+            break;
+          }
+        }
+      }
       ship.shield = rechargeShield(
         ship.shield,
         ship.maxShield,
-        ship.stats.shieldRecharge * (isShieldBoosted(ship.abilities) ? 2 : 1) * engineerShieldRecharge,
+        ship.stats.shieldRecharge * (isShieldBoosted(ship.abilities) ? 2 : 1) * engineerShieldRecharge / shieldDrainMult,
         dt,
       );
       // Affix: HP regeneration (5% max HP per second)
@@ -2183,9 +2328,9 @@ export class FlightScene {
       if (affixData?.regeneratesHp && ship.alive && ship.hp < ship.stats.maxHp) {
         ship.hp = Math.min(ship.stats.maxHp, ship.hp + ship.stats.maxHp * 0.05 * dt);
       }
-      // Mutagen: player HP regeneration
+      // Mutagen: player HP regeneration (uses cached mutagenStats to stay in sync with mid-run absorption)
       if (ship.id === this.player.id && ship.alive) {
-        const regenRate = getHpRegenRate(this.mutagenState.mutations);
+        const regenRate = this.mutagenStats.hpRegenPerSecond * getMutagenStatMult(this.crisisState.activeEffects);
         if (regenRate > 0 && ship.hp < ship.stats.maxHp) {
           ship.hp = Math.min(ship.stats.maxHp, ship.hp + ship.stats.maxHp * regenRate * dt);
         }
@@ -2276,7 +2421,6 @@ export class FlightScene {
         // Track run stats
         this.runStats.waveReached = this.currentWave - 1;
         this.runStats.score = this.endlessScore;
-        this.runStats.creditsEarned = this.endlessCredits;
         this.runStats.timeSeconds = this.elapsedEncounterSeconds;
         this.endlessScore += endlessWaveScore(this.currentWave - 1) + this.comboState.totalComboScore;
         // Grant credits for each wave cleared, multiplied by combo
@@ -2285,6 +2429,7 @@ export class FlightScene {
         const waveCredits = Math.floor(endlessWaveCredits(this.currentWave - 1) * comboMult * creditBoostMult) + this.endlessWaveEliteBonus;
         this.endlessWaveEliteBonus = 0;
         this.endlessCredits += waveCredits;
+        this.runStats.creditsEarned += waveCredits;
         this.onReward(this.encounterId, { credits: waveCredits, score: this.endlessScore, victory: true });
         // Reset combo score bank after applying (combo streak itself persists across waves)
         this.comboState = { ...this.comboState, totalComboScore: 0 };
@@ -2350,6 +2495,8 @@ export class FlightScene {
     projectile.ttl = 0;
     projectile.focusTargetId = undefined;
     projectile.focusDamageMult = undefined;
+    projectile.ownerId = undefined;
+    projectile.ownerIsWingman = undefined;
   }
 
   private syncShipTransform(ship: RuntimeShip): void {
@@ -2865,14 +3012,23 @@ export class FlightScene {
             this.crisisState = resolveCrisisChoice(this.crisisState, effectId);
             this.crisisState = markCrisisResolved(this.crisisState, this.currentWave);
 
-            // Handle adaptive mutation: clear existing mutations
+            // Handle adaptive mutation: clear existing mutations and rebuild stats
             if (shouldClearMutations(this.crisisState.activeEffects)) {
               this.mutagenState = { ...this.mutagenState, mutations: [] };
               this.mutagenStats = computeMutagenStats([]);
               persistMutagenState(this.mutagenState);
+              this.rebuildPlayerWithUpgrades();
             }
 
-            // Close crisis, then open normal shop
+            // Handle containment override: reduce ability cooldowns permanently
+            const cdReduction = getAbilityCooldownReduction(this.crisisState.activeEffects);
+            if (cdReduction > 0) {
+              for (const ability of this.player.abilities) {
+                ability.def = { ...ability.def, cooldown: ability.def.cooldown * (1 - cdReduction) };
+              }
+            }
+
+            // Close crisis and proceed to next wave
             this.closeUpgradeShop();
           });
         });
@@ -3054,7 +3210,7 @@ export class FlightScene {
         ${this.isEndlessMode ? `<div><span>Kills</span><strong>${this.endlessTotalKills}</strong></div>` : ''}
         ${this.isEndlessMode ? `<div><span>Score</span><strong>${this.endlessScore.toLocaleString()}</strong></div>` : ''}
         ${this.isEndlessMode ? `<div><span>Credits</span><strong style=\"color:#fbbf24\">💰 ${this.endlessCredits}</strong></div>` : ''}
-        ${this.isEndlessMode && this.wingmanState.config ? `<div><span>Wingman</span><strong style="color:${this.wingmanState.active ? '#60a5fa' : '#64748b'}">${this.wingmanState.active ? `${this.wingmanState.config.name} ${(this.wingmanState.hpFraction * 100).toFixed(0)}%` : `Respawn ${this.wingmanState.respawnTimer.toFixed(0)}s`}</strong></div>` : ''}
+        ${this.isEndlessMode && this.wingmanState.config ? `<div><span>Wingman</span><strong style="color:${this.wingmanState.active ? '#60a5fa' : '#64748b'}">${this.wingmanState.active ? `${this.wingmanState.config.name} ${(this.wingmanState.hpFraction * 100).toFixed(0)}% · ${this.wingmanState.totalKills} K · ${Math.round(this.wingmanState.totalDamageDealt)} dmg` : `Respawn ${this.wingmanState.respawnTimer.toFixed(0)}s · ${this.wingmanState.totalKills} K · ${Math.round(this.wingmanState.totalDamageDealt)} dmg`}</strong></div>` : ''}
         ${this.isEndlessMode && this.nemesisState.active ? `<div><span>Nemesis</span><strong style="color:#f472b6">${getNemesisStatus(this.nemesisState.active)}</strong></div>` : ''}
         ${this.isEndlessMode && this.purchasedUpgrades.length > 0 ? `<div><span>Upgrades</span><strong>${this.purchasedUpgrades.length}</strong></div>` : ''}
       </div>
@@ -3447,7 +3603,7 @@ export class FlightScene {
         const nebula = mesh.children[0] as THREE.Mesh | undefined;
         const ring = mesh.children[1] as THREE.Mesh | undefined;
         if (nebula?.material instanceof THREE.MeshBasicMaterial) {
-          nebula.material.opacity = 0.1 + pulse * 0.08;
+          nebula.material.opacity = 0.22 + pulse * 0.12;
         }
         if (ring?.material instanceof THREE.MeshBasicMaterial) {
           ring.material.opacity = 0.2 + pulse * 0.1;
@@ -3466,11 +3622,12 @@ export class FlightScene {
 
       for (const hazard of this.hazards) {
         const result = applyShipHazardCollision(
-          hazard, ship.id, ship.position.x, ship.position.z, ship.radius * 0.4, dt, now,
+          hazard, ship.id, ship.position.x, ship.position.z, ship.radius * 0.45, dt, now,
         );
 
-        // Asteroid push
-        if (result.pushX !== 0 || result.pushZ !== 0) {
+        // Asteroid push (skip during dash — phase through)
+        const isPlayerDashing = ship.id === this.player.id && isDashing(this.dashState);
+        if (!isPlayerDashing && (result.pushX !== 0 || result.pushZ !== 0)) {
           ship.position.x += result.pushX;
           ship.position.z += result.pushZ;
           // Kill velocity component into the asteroid
@@ -3492,14 +3649,14 @@ export class FlightScene {
 
         // Damage nebula
         if (result.damageTaken > 0) {
-          // Nebula does raw energy damage — bypass shields but respects armor
+          // Nebula bypasses shields — direct hull damage only, respecting armor
+          const isPlayerShip = ship.id === this.player.id;
+          if (isPlayerShip && isInvulnerable(this.dashState)) continue;
           const resolved = resolveDamage(
             result.damageTaken, 'energy', 0.5,
-            ship.shield, ship.stats.armorRating,
+            0, ship.stats.armorRating,
             ship.stats.kineticBypass, ship.stats.energyVulnerability,
           );
-          ship.shield -= resolved.shieldAbsorbed;
-          ship.shield = Math.max(0, ship.shield);
           if (resolved.hullDamage > 0) {
             const destroyed = damageModules(ship.moduleStates, resolved.hullDamage, Math.random() * Math.PI * 2, 0.6);
             if (destroyed.length > 0) {
@@ -3507,6 +3664,14 @@ export class FlightScene {
                 this.darkenModuleMeshes(ship, id);
               }
               ship.hp = ship.moduleStates.filter((m) => !m.destroyed).reduce((sum, m) => sum + m.currentHp, 0);
+              if (ship.id === this.player.id) {
+                this.spawnImpactVisual(ship.position, '#c084fc');
+                this.recentDamageTime = this.elapsedEncounterSeconds;
+              }
+            }
+            if (this.isEndlessMode) {
+              if (isPlayerShip) this.runStats.damageTaken += resolved.hullDamage;
+              else this.runStats.damageDealt += resolved.hullDamage;
             }
           }
           if (ship.hp <= 0) {
@@ -3517,7 +3682,7 @@ export class FlightScene {
             for (const config of ParticleSystem.deathExplosion(ship.position)) {
               this.particles.emit(config);
             }
-            if (ship.team === 'player') {
+            if (ship.id === this.player.id) {
               this.resolveNemesisOnPlayerDeath();
             }
             this.handleAffixExplosion(ship);
@@ -3682,7 +3847,7 @@ export class FlightScene {
       // Magnetic attraction toward player
       if (updated.active && this.player.alive) {
         const attracted = applyPickupAttraction(
-          { ...updated, attractionRange: updated.attractionRange * (1 + this.upgradeStats.pickupRangeBonus) },
+          { ...updated, attractionRange: updated.attractionRange * (1 + this.effectiveStats.pickupRangeBonus) },
           this.player.position.x, this.player.position.z, dt,
         );
         updated.x = attracted.newX;
@@ -3742,8 +3907,8 @@ export class FlightScene {
             if (result.buffGained) {
               // Apply buff duration bonus from upgrades
               const buff = result.buffGained;
-              buff.remaining *= this.upgradeStats.buffDurationBonus;
-              buff.duration *= this.upgradeStats.buffDurationBonus;
+              buff.remaining *= this.effectiveStats.buffDurationBonus;
+              buff.duration *= this.effectiveStats.buffDurationBonus;
               this.playerBuffs.push(buff);
             }
 
@@ -3880,7 +4045,8 @@ export class FlightScene {
       const dist = dir.length();
       if (dist > 0.5) {
         dir.normalize();
-        this.bossShip.velocity.copy(dir.multiplyScalar(12));
+        const chargeSpeed = 12 * getBossPhaseMultipliers(this.bossAI).speedMult;
+        this.bossShip.velocity.copy(dir.multiplyScalar(chargeSpeed));
         this.bossShip.position.addScaledVector(this.bossShip.velocity, dt);
         this.clampToArena(this.bossShip.position);
       }
@@ -4102,13 +4268,22 @@ export class FlightScene {
       this.applyDamage(this.player, dmg, 'kinetic', 0.5, 0);
     }
 
-    // Damage other enemies (friendly fire)
+    // Damage other ships in range (player already handled above)
+    const chainActive = chainReactionActive(this.activeMutators);
     for (const other of this.ships) {
-      if (other.id === ship.id || !other.alive) continue;
+      if (other.id === ship.id || other.id === this.player.id || !other.alive) continue;
       const dist = ship.position.distanceTo(other.position);
       if (dist < EXPLOSION_RADIUS) {
-        const dmg = Math.round(EXPLOSION_DAMAGE * (1 - dist / EXPLOSION_RADIUS * 0.5));
-        this.applyDamage(other, dmg, 'kinetic', 0.5, 0);
+        if (other.team === 'player') {
+          // Explosive enemies also damage player-team allies (wingman, escort)
+          const dmg = Math.round(EXPLOSION_DAMAGE * (1 - dist / EXPLOSION_RADIUS * 0.5));
+          this.applyDamage(other, dmg, 'kinetic', 0.5, 0);
+        } else if (chainActive && other.team === 'enemy') {
+          // Chain Reaction: player's mutator makes enemy explosions chain to other enemies
+          const dmg = Math.round(EXPLOSION_DAMAGE * (1 - dist / EXPLOSION_RADIUS * 0.5));
+          this.applyDamage(other, dmg, 'kinetic', 0.5, 0);
+          this.particles.emit(ParticleSystem.hitSpark(other.position, '#fbbf24'));
+        }
       }
     }
   }
@@ -4147,6 +4322,7 @@ export class FlightScene {
     const rewardBits = [`+${contract.reward.credits} credits`, `+${contract.reward.score} score`];
 
     this.endlessCredits += contract.reward.credits;
+    this.runStats.creditsEarned += contract.reward.credits;
     this.endlessScore += contract.reward.score;
 
     if (contract.reward.overdriveCharge) {
@@ -4172,6 +4348,7 @@ export class FlightScene {
       } else {
         creditsRewarded += 12;
         this.endlessCredits += 12;
+        this.runStats.creditsEarned += 12;
         rewardBits.push('+12 credits (essence bay full)');
       }
     }
@@ -4305,8 +4482,7 @@ export class FlightScene {
     if (!canAddMutator(this.activeMutators, mutator)) return;
     this.activeMutators.push({ def: mutator, acquiredWave: this.shopWaveCleared });
     this.runStats.mutatorsChosen.push(mutator.displayName);
-    // Apply stat modifications immediately
-    this.upgradeStats = applyMutatorStatMods(this.upgradeStats, this.activeMutators);
+    // Stat mods are applied on-the-fly via effectiveStats — no need to bake into upgradeStats
     this.rebuildPlayerWithUpgrades();
     this.shopMutatorOptions = []; // Remove mutator option after picking
   }
@@ -4316,7 +4492,7 @@ export class FlightScene {
    * and applying all accumulated upgrade bonuses on top.
    */
   private rebuildPlayerWithUpgrades(): void {
-    const s = this.upgradeStats;
+    const s = this.effectiveStats;
     const baseStats = applyCrewModifiers(computeShipStats(this.player.blueprint), this.player.blueprint.crew);
 
     // Start from base stats
@@ -4343,13 +4519,17 @@ export class FlightScene {
     this.player.maxShield += s.shieldBonus;
     this.player.shield = Math.min(this.player.shield + s.shieldBonus, this.player.maxShield);
     this.player.hp = Math.min(this.player.hp + s.maxHpBonus, this.player.stats.maxHp);
+    // Clamp HP to at least 1 after stat changes so mutator choices don't instantly kill
+    this.player.hp = Math.max(1, this.player.hp);
 
     // Apply permanent mutagen stats
     const mutagenStatMult = getMutagenStatMult(this.crisisState.activeEffects);
     this.player.stats.maxHp = Math.round(this.player.stats.maxHp * this.mutagenStats.maxHpMultiplier * mutagenStatMult);
-    this.player.stats.shieldStrength = Math.round(this.player.stats.shieldStrength * this.mutagenStats.shieldMultiplier);
-    this.player.stats.thrust *= this.mutagenStats.thrustMultiplier;
+    this.player.stats.shieldStrength = Math.round(this.player.stats.shieldStrength * this.mutagenStats.shieldMultiplier * mutagenStatMult);
+    this.player.stats.thrust *= this.mutagenStats.thrustMultiplier * mutagenStatMult;
     this.player.stats.armorRating += Math.round(this.mutagenStats.armorBonus * mutagenStatMult);
+    // Re-apply legacy bonuses that survive rebuilds (bonus_hp, shield_seed, heat_sink)
+    this.reapplyLegacyOnRebuild(this.player);
     this.player.maxShield = this.player.stats.shieldStrength;
     this.player.shield = Math.min(this.player.shield, this.player.maxShield);
     this.player.hp = Math.min(this.player.hp, this.player.stats.maxHp);
@@ -4584,6 +4764,7 @@ export class FlightScene {
     const reward = getNemesisReward(this.nemesisState.active.level);
     const fallenName = this.nemesisState.active.callsign;
     this.endlessCredits += reward.credits;
+    this.runStats.creditsEarned += reward.credits;
     this.endlessScore += reward.score;
     this.onReward(this.encounterId, { credits: reward.credits, score: this.endlessScore, victory: true });
     this.nemesisState = recordNemesisDefeat(this.nemesisState, this.currentWave);
@@ -4597,12 +4778,21 @@ export class FlightScene {
 
   // ── Legacy Codex Methods ──────────────────────────────────
 
+  private legacyComboWindowBonus = 0;
+  private legacyAbilityCdMult = 1;
+  /** Fixed HP bonus computed at run start, used for consistent rebuilds. */
+  private legacyFlatHpBonus = 0;
+
   private applyLegacyBonuses(): void {
     const effects = getActiveBonusEffects(this.legacyState);
+    this.legacyComboWindowBonus = 0;
+    this.legacyAbilityCdMult = 1;
+    this.legacyFlatHpBonus = 0;
     for (const effect of effects) {
       switch (effect.kind) {
         case 'bonus_hp': {
           const bonus = Math.round(this.player.stats.maxHp * (effect.value / 100));
+          this.legacyFlatHpBonus = bonus;
           this.player.hp += bonus;
           this.player.stats.maxHp += bonus;
           for (const mod of this.player.moduleStates) {
@@ -4629,12 +4819,15 @@ export class FlightScene {
           this.upgradeStats.dashCooldownReduction += effect.value / 100;
           break;
         case 'combo_window':
-          this.comboState.timer += effect.value;
+          this.legacyComboWindowBonus = effect.value;
           break;
         case 'ability_cd_reduction':
-          // Reduce all ability cooldowns by the fraction
+          // Reduce base cooldowns on ability defs so the effect persists
+          // across activation cycles instead of only touching the initial
+          // cooldownRemaining (which is 0 at run start and thus a no-op).
+          this.legacyAbilityCdMult = Math.max(0.5, this.legacyAbilityCdMult * (1 - effect.value / 100));
           for (const ability of this.player.abilities) {
-            ability.cooldownRemaining *= (1 - effect.value / 100);
+            ability.def = { ...ability.def, cooldown: ability.def.cooldown * (1 - effect.value / 100) };
           }
           break;
         case 'credit_percent':
@@ -4642,6 +4835,39 @@ export class FlightScene {
           break;
       }
     }
+  }
+
+  /** Re-apply legacy bonuses that modify stat baselines after module destruction rebuilds. */
+  private reapplyLegacyOnRebuild(ship: RuntimeShip): void {
+    if (!this.isEndlessMode || ship.id !== this.player.id) return;
+    const persistent = getRebuildPersistentEffects(this.legacyState);
+    for (const bonus of persistent) {
+      switch (bonus.effect.kind) {
+        case 'bonus_hp':
+          ship.stats.maxHp += this.legacyFlatHpBonus;
+          break;
+        case 'bonus_shield': {
+          if (ship.maxShield > 0) {
+            ship.maxShield += bonus.effect.value;
+            ship.shield = Math.min(ship.shield, ship.maxShield);
+          }
+          break;
+        }
+        case 'heat_capacity':
+          ship.stats.heatCapacity *= (1 + bonus.effect.value / 100);
+          break;
+      }
+    }
+  }
+
+  /** Re-apply mutagen stat multipliers after module rebuilds so they stay coherent. */
+  private reapplyMutagenOnRebuild(ship: RuntimeShip): void {
+    if (ship.id !== this.player.id) return;
+    const mutagenStatMult = getMutagenStatMult(this.crisisState.activeEffects);
+    ship.stats.maxHp = Math.round(ship.stats.maxHp * this.mutagenStats.maxHpMultiplier * mutagenStatMult);
+    ship.stats.shieldStrength = Math.round(ship.stats.shieldStrength * this.mutagenStats.shieldMultiplier * mutagenStatMult);
+    ship.stats.thrust *= this.mutagenStats.thrustMultiplier * mutagenStatMult;
+    ship.stats.armorRating += Math.round(this.mutagenStats.armorBonus * mutagenStatMult);
   }
 
   private finalizeLegacyRun(snapshot: RunSnapshot): void {
@@ -4704,6 +4930,42 @@ export class FlightScene {
 
   // ── Wingman Methods ─────────────────────────────────────────
 
+  private clearShipHealthBar(shipId: string): void {
+    const existing = this.shipHealthBars.get(shipId);
+    if (!existing) return;
+    this.healthBarGroup.remove(existing.bg, existing.fg, existing.shieldBg, existing.shieldFg);
+    existing.bg.geometry.dispose();
+    existing.fg.geometry.dispose();
+    existing.shieldBg.geometry.dispose();
+    existing.shieldFg.geometry.dispose();
+    this.shipHealthBars.delete(shipId);
+  }
+
+  private removeOwnedDrones(ownerId: string): void {
+    for (let i = this.drones.length - 1; i >= 0; i -= 1) {
+      const drone = this.drones[i];
+      if (drone.ownerId !== ownerId) continue;
+      this.scene.remove(drone.mesh);
+      if ('geometry' in drone.mesh && drone.mesh.geometry) {
+        (drone.mesh.geometry as THREE.BufferGeometry).dispose();
+      }
+      if (drone.mesh.material instanceof THREE.Material) {
+        drone.mesh.material.dispose();
+      }
+      this.drones.splice(i, 1);
+    }
+  }
+
+  private removeWingmanRuntime(): void {
+    if (!this.wingmanShip) return;
+    this.clearShipHealthBar(this.wingmanShip.id);
+    this.removeOwnedDrones(this.wingmanShip.id);
+    this.scene.remove(this.wingmanShip.group);
+    const idx = this.ships.indexOf(this.wingmanShip);
+    if (idx >= 0) this.ships.splice(idx, 1);
+    this.wingmanShip = null;
+  }
+
   private spawnWingman(): void {
     if (!this.wingmanState.config || !this.player) return;
     const entry = this.salvageCollection.entries.find(
@@ -4711,21 +4973,31 @@ export class FlightScene {
     );
     if (!entry) return;
 
+    if (this.wingmanShip) this.removeWingmanRuntime();
+
     const bp = entry.blueprint;
-    const pos = new THREE.Vector3(-3, 0, 6);
-    const ship = this.createShip('wingman-1', 'player', bp, pos, Math.PI, 12, 0.15);
+    const spawn = getWingmanSpawnPoint(this.player.position.x, this.player.position.z, this.player.rotation);
+    const ship = this.createShip(
+      'wingman-1',
+      'player',
+      bp,
+      new THREE.Vector3(spawn.x, 0, spawn.z),
+      spawn.rotation,
+      12,
+      0.15,
+    );
     ship.isWingman = true;
     this.ships.push(ship);
+    this.spawnDronesForShip(ship);
     this.wingmanShip = ship;
+    this.syncShipTransform(ship);
   }
 
   private updateWingman(dt: number): void {
     if (!this.isEndlessMode || !this.wingmanState.config) return;
 
-    // Update respawn timer
     if (!this.wingmanState.active) {
       this.wingmanState = updateWingmanTimers(this.wingmanState, dt);
-      // Respawn
       if (this.wingmanState.active && !this.wingmanShip) {
         this.spawnWingman();
       }
@@ -4734,38 +5006,35 @@ export class FlightScene {
 
     if (!this.wingmanShip || !this.player) return;
 
-    // Check wingman alive
-    if (this.wingmanShip.hp <= 0) {
+    if (!this.wingmanShip.alive || this.wingmanShip.hp <= 0) {
       this.wingmanState = killWingman(this.wingmanState);
-      // Remove from ships array
-      const idx = this.ships.indexOf(this.wingmanShip);
-      if (idx >= 0) this.ships.splice(idx, 1);
-      this.wingmanShip = null;
+      this.wingmanFireTimer = 0;
+      this.removeWingmanRuntime();
       return;
     }
 
-    // Update hp fraction
-    this.wingmanState.hpFraction = this.wingmanShip.hp / this.wingmanShip.stats.maxHp;
+    this.wingmanState.hpFraction = this.wingmanShip.hp / Math.max(1, this.wingmanShip.stats.maxHp);
+    this.wingmanFireTimer = Math.max(0, this.wingmanFireTimer - dt);
+    this.wingmanState.fireTimer = this.wingmanFireTimer;
 
-    // Gather enemy positions
     const enemies = this.ships
       .filter((s) => s.team === 'enemy' && s.alive)
       .map((s) => ({
         id: s.id,
-        x: s.group.position.x,
-        z: s.group.position.z,
+        x: s.position.x,
+        z: s.position.z,
         alive: s.alive,
       }));
 
     const baseAi = computeWingmanAI({
-      playerX: this.player.group.position.x,
-      playerZ: this.player.group.position.z,
-      playerRotation: this.player.group.rotation.y,
-      wingmanX: this.wingmanShip.group.position.x,
-      wingmanZ: this.wingmanShip.group.position.z,
-      wingmanRotation: this.wingmanShip.group.rotation.y,
+      playerX: this.player.position.x,
+      playerZ: this.player.position.z,
+      playerRotation: this.player.rotation,
+      wingmanX: this.wingmanShip.position.x,
+      wingmanZ: this.wingmanShip.position.z,
+      wingmanRotation: this.wingmanShip.rotation,
       enemyPositions: enemies,
-      wingmanFireInterval: 0.5,
+      wingmanFireInterval: 0.5 / WINGMAN_FIRE_RATE_MULT,
     });
     const commandedTargetId = getCrewOrderTargetId(this.crewOrdersState);
     const commandedTarget = commandedTargetId
@@ -4777,47 +5046,48 @@ export class FlightScene {
           moveX: commandedTarget.position.x,
           moveZ: commandedTarget.position.z,
           targetRotation: Math.atan2(
-            commandedTarget.position.x - this.wingmanShip.group.position.x,
-            commandedTarget.position.z - this.wingmanShip.group.position.z,
+            commandedTarget.position.x - this.wingmanShip.position.x,
+            commandedTarget.position.z - this.wingmanShip.position.z,
           ),
-          shouldFire: commandedTarget.position.distanceTo(this.wingmanShip.group.position) < 18,
+          shouldFire: commandedTarget.position.distanceTo(this.wingmanShip.position) < 18,
           targetId: commandedTarget.id,
         }
       : baseAi;
 
-    // Move wingman toward target position
-    const dx = ai.moveX - this.wingmanShip.group.position.x;
-    const dz = ai.moveZ - this.wingmanShip.group.position.z;
+    const dx = ai.moveX - this.wingmanShip.position.x;
+    const dz = ai.moveZ - this.wingmanShip.position.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
     if (dist > 0.5) {
-      const speed = 8 * dt;
-      const moveX = (dx / dist) * Math.min(speed, dist);
-      const moveZ = (dz / dist) * Math.min(speed, dist);
-      this.wingmanShip.group.position.x += moveX;
-      this.wingmanShip.group.position.z += moveZ;
+      const step = Math.min(8 * dt, dist);
+      const moveX = (dx / dist) * step;
+      const moveZ = (dz / dist) * step;
+      this.wingmanShip.position.x += moveX;
+      this.wingmanShip.position.z += moveZ;
+      this.wingmanShip.velocity.set(moveX / Math.max(dt, 0.001), 0, moveZ / Math.max(dt, 0.001));
+    } else {
+      this.wingmanShip.velocity.set(0, 0, 0);
     }
 
-    // Rotate toward target
-    const angleDiff = ai.targetRotation - this.wingmanShip.group.rotation.y;
-    const wrapped = ((angleDiff + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
-    this.wingmanShip.group.rotation.y += wrapped * 5 * dt;
+    this.wingmanShip.rotation = lerpAngle(
+      this.wingmanShip.rotation,
+      ai.targetRotation,
+      Math.min(1, dt * 5),
+    );
 
-    // Fire at target
-    if (ai.shouldFire && ai.targetId) {
-      this.wingmanFireTimer -= dt;
-      if (this.wingmanFireTimer <= 0) {
-        this.wingmanFireTimer = 0.5 / WINGMAN_FIRE_RATE_MULT;
-        const target = this.ships.find((s) => s.id === ai.targetId);
-        if (target && target.alive && this.wingmanShip) {
-          const dir = new THREE.Vector3()
-            .subVectors(target.group.position, this.wingmanShip.group.position)
-            .normalize();
-          this.tryFire(this.wingmanShip, dir);
-        }
+    if (ai.shouldFire && ai.targetId && this.wingmanFireTimer <= 0) {
+      this.wingmanFireTimer = 0.5 / WINGMAN_FIRE_RATE_MULT;
+      const target = this.ships.find((s) => s.id === ai.targetId);
+      if (target && target.alive && this.wingmanShip) {
+        const dir = new THREE.Vector3()
+          .subVectors(target.position, this.wingmanShip.position)
+          .normalize();
+        this.tryFire(this.wingmanShip, dir);
       }
     }
 
+    this.wingmanState.fireTimer = this.wingmanFireTimer;
     this.wingmanState.targetId = ai.targetId;
+    this.syncShipTransform(this.wingmanShip);
   }
 
   private buildLegacySnapshot(grade: { letter: string }): RunSnapshot {

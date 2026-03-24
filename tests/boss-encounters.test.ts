@@ -193,6 +193,83 @@ describe('attack lifecycle', () => {
     expect(state.activeAttackTimer).toBeGreaterThan(0);
   });
 
+  it('preserves mine telegraphs when mine field becomes active', () => {
+    const state: BossAIState = {
+      ...createBossAI(5),
+      telegraphing: {
+        id: 'mine_field',
+        displayName: 'Mine Deployment',
+        telegraphDuration: 1,
+        activeDuration: 2.5,
+        cooldown: 9,
+        damage: 6,
+        radius: 2,
+        tracksPlayer: false,
+        warningText: 'MINES DEPLOYED',
+        warningIcon: '💣',
+      },
+      telegraphTimer: 0.05,
+      telegraphs: [
+        {
+          attackId: 'mine_field',
+          position: { x: 8, z: -2 },
+          timeRemaining: 0.05,
+          duration: 1,
+          radius: 2,
+          tracksPlayer: false,
+        },
+        {
+          attackId: 'mine_field',
+          position: { x: -6, z: 4 },
+          timeRemaining: 0.05,
+          duration: 1,
+          radius: 2,
+          tracksPlayer: false,
+        },
+      ],
+    };
+    const ctx = makeContext();
+    const updated = updateBossAI(state, 0.1, ctx.bossHp, ctx.bossMaxHp, ctx.bossPos, ctx.playerPos);
+    expect(updated.activeAttack?.id).toBe('mine_field');
+    expect(updated.telegraphs).toHaveLength(2);
+  });
+
+  it('keeps charge targets committed once the dash starts', () => {
+    const originalTarget = { x: 10, z: -6 };
+    const ctx = makeContext({ bossPos: { x: 0, z: 0 }, playerPos: { x: 4, z: 7 } });
+
+    for (const id of ['charge', 'ram'] as const) {
+      const updated = updateBossAI(
+        {
+          ...createBossAI(5),
+          activeAttack: {
+            id,
+            displayName: id,
+            telegraphDuration: 0.7,
+            activeDuration: 1.2,
+            cooldown: 7,
+            damage: 20,
+            radius: 3,
+            tracksPlayer: true,
+            warningText: '',
+            warningIcon: '',
+          },
+          activeAttackTimer: 1.2,
+          chargeTarget: originalTarget,
+          chargeProgress: 0.2,
+        },
+        0.2,
+        ctx.bossHp,
+        ctx.bossMaxHp,
+        ctx.bossPos,
+        ctx.playerPos,
+      );
+
+      expect(updated.chargeTarget).toEqual(originalTarget);
+      expect(updated.chargeProgress).toBeGreaterThan(0.2);
+    }
+  });
+
   it('transitions from active to cooldown', () => {
     let state = createBossAI(5);
     const ctx = makeContext();
@@ -383,6 +460,76 @@ describe('isPointInBossAttackArea', () => {
     expect(isPointInBossAttackArea(state, { x: 2, z: 2 }, { x: 0, z: 0 })).toBe(true);
     // Far from boss should not be hit
     expect(isPointInBossAttackArea(state, { x: 15, z: 15 }, { x: 0, z: 0 })).toBe(false);
+  });
+
+  it('barrage damage follows the telegraphed strike zone', () => {
+    const state: BossAIState = {
+      ...createBossAI(5),
+      activeAttack: {
+        id: 'barrage',
+        displayName: 'Punisher Barrage',
+        telegraphDuration: 0.8,
+        activeDuration: 2,
+        cooldown: 4,
+        damage: 8,
+        radius: 4,
+        tracksPlayer: true,
+        warningText: '',
+        warningIcon: '',
+      },
+      activeAttackTimer: 1.2,
+      telegraphs: [
+        {
+          attackId: 'barrage',
+          position: { x: 10, z: 0 },
+          timeRemaining: 1,
+          duration: 1,
+          radius: 4,
+          tracksPlayer: false,
+        },
+      ],
+    };
+    expect(isPointInBossAttackArea(state, { x: 10, z: 1 }, { x: 0, z: 0 })).toBe(true);
+    expect(isPointInBossAttackArea(state, { x: 1, z: 1 }, { x: 0, z: 0 })).toBe(false);
+  });
+
+  it('mine field only hits inside active mine circles', () => {
+    const state: BossAIState = {
+      ...createBossAI(5),
+      activeAttack: {
+        id: 'mine_field',
+        displayName: 'Mine Deployment',
+        telegraphDuration: 1,
+        activeDuration: 2.5,
+        cooldown: 9,
+        damage: 6,
+        radius: 2,
+        tracksPlayer: false,
+        warningText: '',
+        warningIcon: '',
+      },
+      activeAttackTimer: 1.4,
+      telegraphs: [
+        {
+          attackId: 'mine_field',
+          position: { x: -4, z: 3 },
+          timeRemaining: 1,
+          duration: 1,
+          radius: 2,
+          tracksPlayer: false,
+        },
+        {
+          attackId: 'mine_field',
+          position: { x: 7, z: -2 },
+          timeRemaining: 1,
+          duration: 1,
+          radius: 2,
+          tracksPlayer: false,
+        },
+      ],
+    };
+    expect(isPointInBossAttackArea(state, { x: -4, z: 2.5 }, { x: 0, z: 0 })).toBe(true);
+    expect(isPointInBossAttackArea(state, { x: 0, z: 0 }, { x: 0, z: 0 })).toBe(false);
   });
 });
 

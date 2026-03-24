@@ -447,16 +447,15 @@ export function updateBossAI(
   }
 
   // ── Update telegraph timers ──
-  const newTelegraphs = s.telegraphs
-    .map((t) => ({
-      ...t,
-      timeRemaining: t.timeRemaining - dt,
-      // Update tracking position
-      position: t.tracksPlayer
-        ? { x: playerPos.x, z: playerPos.z }
-        : t.position,
-    }))
-    .filter((t) => t.timeRemaining > EPSILON);
+  const trackedTelegraphs = s.telegraphs.map((t) => ({
+    ...t,
+    timeRemaining: t.timeRemaining - dt,
+    // Update tracking position
+    position: t.tracksPlayer
+      ? { x: playerPos.x, z: playerPos.z }
+      : t.position,
+  }));
+  const newTelegraphs = trackedTelegraphs.filter((t) => t.timeRemaining > EPSILON);
 
   // ── Telegraphing phase ──
   if (s.telegraphing) {
@@ -465,10 +464,11 @@ export function updateBossAI(
       // Telegraph complete → attack goes active
       const attack = s.telegraphing;
 
-      // Create telegraph visuals during telegraph, clear on active
-      const finalTelegraphs = newTelegraphs.filter(
-        (t) => t.attackId !== attack.id,
-      );
+      // Freeze the final telegraph positions for strike-zone attacks so the
+      // active damage area matches what the player just saw.
+      const finalTelegraphs = shouldPersistStrikeZones(attack.id)
+        ? trackedTelegraphs.filter((t) => t.attackId === attack.id)
+        : newTelegraphs.filter((t) => t.attackId !== attack.id);
 
       // Set up attack-specific state
       let beamSweepAngle = s.beamSweepAngle;
@@ -530,14 +530,9 @@ export function updateBossAI(
       beamSweepAngle += s.beamSweepDirection * dt * 1.8;
     }
     if (attack.id === 'charge' || attack.id === 'ram') {
-      // Move charge progress
+      // Commit to the target chosen at activation time. Re-targeting mid-dash
+      // makes the strike collapse toward the boss instead of finishing the run.
       chargeProgress = Math.min(1, chargeProgress + dt / attack.activeDuration);
-      if (chargeTarget) {
-        chargeTarget = {
-          x: bossPos.x + (chargeTarget.x - bossPos.x) * dt * 2.5,
-          z: bossPos.z + (chargeTarget.z - bossPos.z) * dt * 2.5,
-        };
-      }
     }
     if (attack.id === 'shockwave') {
       shockwaveRadius = Math.min(
@@ -642,6 +637,24 @@ function createMineTelegraphs(
   return mines;
 }
 
+function shouldPersistStrikeZones(attackId: BossAttackId): boolean {
+  return attackId === 'barrage'
+    || attackId === 'missile_sweep'
+    || attackId === 'mine_field'
+    || attackId === 'final_barrage';
+}
+
+function pointInTelegraphedZone(
+  telegraphs: BossTelegraph[],
+  attackId: BossAttackId,
+  point: { x: number; z: number },
+): boolean {
+  return telegraphs.some((telegraph) => (
+    telegraph.attackId === attackId
+      && Math.hypot(point.x - telegraph.position.x, point.z - telegraph.position.z) <= telegraph.radius + 0.75
+  ));
+}
+
 // ── Damage Queries ───────────────────────────────────────────
 
 /**
@@ -744,16 +757,16 @@ export function isPointInBossAttackArea(
     }
     case 'barrage':
     case 'final_barrage': {
-      // Area around where the telegraph was pointing (tracks player)
+      const hasStrikeZones = state.telegraphs.some((telegraph) => telegraph.attackId === attack.id);
+      if (hasStrikeZones) return pointInTelegraphedZone(state.telegraphs, attack.id, point);
       const dist = Math.hypot(point.x - bossPos.x, point.z - bossPos.z);
       return dist <= attack.radius + 3;
     }
     case 'mine_field': {
-      // Check against active mine telegraphs that expired (now active)
-      return state.telegraphs.length === 0; // All mines active when telegraphs clear
+      return pointInTelegraphedZone(state.telegraphs, attack.id, point);
     }
     case 'missile_sweep': {
-      // Homing missiles — check proximity to boss
+      if (pointInTelegraphedZone(state.telegraphs, attack.id, point)) return true;
       const dist = Math.hypot(point.x - bossPos.x, point.z - bossPos.z);
       return dist <= attack.radius + 2;
     }

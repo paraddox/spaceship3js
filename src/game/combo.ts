@@ -20,11 +20,13 @@
 
 export interface ComboState {
   kills: number;
-  timer: number;         // seconds remaining before combo resets
-  bestKills: number;     // best combo this run
+  timer: number;
+  bestKills: number;
   totalComboScore: number;
   tierAnnouncement: string;
   tierAnnouncementTimer: number;
+  /** Extra seconds added to the combo timeout from legacy bonuses. */
+  timeoutBonus: number;
 }
 
 export interface ComboTier {
@@ -50,7 +52,7 @@ const COMBO_TIMEOUT = 4.0;
 /** Base score per kill within a combo (scaled by tier). */
 const COMBO_SCORE_PER_KILL = 25;
 
-export function createComboState(): ComboState {
+export function createComboState(timeoutBonus = 0): ComboState {
   return {
     kills: 0,
     timer: 0,
@@ -58,6 +60,7 @@ export function createComboState(): ComboState {
     totalComboScore: 0,
     tierAnnouncement: '',
     tierAnnouncementTimer: 0,
+    timeoutBonus,
   };
 }
 
@@ -82,7 +85,7 @@ export function registerComboKill(state: ComboState): { state: ComboState; tierU
   const newTier = getComboTier(newKills);
 
   const newTimer = newTier.minKills > 0
-    ? COMBO_TIMEOUT + Math.min(newKills * 0.15, 2)   // longer timer at higher combos
+    ? COMBO_TIMEOUT + state.timeoutBonus + Math.min(newKills * 0.15, 2)   // longer timer at higher combos
     : 0;
 
   const scoreGain = newTier.minKills > 0
@@ -99,6 +102,7 @@ export function registerComboKill(state: ComboState): { state: ComboState; tierU
     totalComboScore: state.totalComboScore + scoreGain,
     tierAnnouncement: tierUp ? `${newTier.icon} ${newTier.label} x${newTier.multiplier}` : state.tierAnnouncement,
     tierAnnouncementTimer: tierUp ? 2.5 : state.tierAnnouncementTimer,
+    timeoutBonus: state.timeoutBonus,
   };
 
   return { state: newState, tierUp };
@@ -148,13 +152,13 @@ export function getComboTimerFraction(state: ComboState): number {
   // Reconstruct the max timer for current kill count
   const tier = getComboTier(state.kills);
   if (tier.minKills === 0) return 0;
-  const maxTimer = COMBO_TIMEOUT + Math.min(state.kills * 0.15, 2);
+  const maxTimer = COMBO_TIMEOUT + state.timeoutBonus + Math.min(state.kills * 0.15, 2);
   return Math.max(0, state.timer / maxTimer);
 }
 
 /**
  * Reset combo state (e.g., on run restart).
  */
-export function resetCombo(): ComboState {
-  return createComboState();
+export function resetCombo(timeoutBonus = 0): ComboState {
+  return createComboState(timeoutBonus);
 }

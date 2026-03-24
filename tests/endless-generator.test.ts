@@ -23,15 +23,11 @@ describe('generateEndlessWave', () => {
     }
   });
 
-  it('every 5th wave is a boss wave with frigate', () => {
-    for (const w of [5, 10, 15, 20]) {
+  it('every 5th wave is a single scripted boss encounter', () => {
+    for (const w of [5, 10, 15, 20, 30]) {
       const wave = generateEndlessWave(w);
-      expect(wave.enemies.length).toBeGreaterThanOrEqual(1);
-      // Boss waves have at least one frigate-class enemy
-      const hasFrigate = wave.enemies.some(
-        (e) => e.blueprint.modules.length >= 10,
-      );
-      expect(hasFrigate).toBe(true);
+      expect(wave.enemies.length).toBe(1);
+      expect(wave.enemies[0].blueprint.modules.length).toBeGreaterThanOrEqual(10);
     }
   });
 
