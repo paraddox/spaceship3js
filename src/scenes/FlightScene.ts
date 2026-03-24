@@ -185,6 +185,7 @@ import {
   getNextRunTip,
   getHighlights,
 } from '../game/run-report';
+import { buildRunRecord, saveRunRecord } from '../game/run-chronicle';
 import {
   createDashState,
   canDash,
@@ -3924,6 +3925,18 @@ export class FlightScene {
 
         // Finalize legacy progression (idempotent)
         this.finalizeLegacyRun(this.buildLegacySnapshot(grade));
+
+        // Save run to pilot chronicle
+        try {
+          saveRunRecord(buildRunRecord({
+            stats: s,
+            shipName: this.player.blueprint.name,
+            sigil: this.sigilState.activeId ? { id: this.sigilState.activeId, tier: this.sigilState.currentTier } : null,
+            mutators: s.mutatorsChosen,
+            upgrades: s.upgradesPurchased,
+            crisisChoices: [],
+          }));
+        } catch { /* chronicle unavailable — non-critical */ }
         const legacySummary = getLegacySummary(this.legacyState);
         const legacyXpGained = computeLegacyXp(this.buildLegacySnapshot(grade));
         const milestoneTags = this.legacyNewMilestones.length > 0
