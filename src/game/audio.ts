@@ -86,3 +86,10 @@ export function playBossDefeated(): void {
   tone(480, 0.35, 0.06, 'sine');
   tone(720, 0.3, 0.05, 'sine');
 }
+
+// ── Arena Rift Audio ──────────────────────────────────────────
+
+export function playRiftActivate(): void { tone(220, 0.3, 0.06, 'sine'); tone(330, 0.25, 0.05, 'sine'); }
+export function playRiftDeactivate(): void { tone(330, 0.2, 0.04, 'sine'); tone(165, 0.3, 0.05, 'sine'); }
+export function playRiftEmpPulse(): void { tone(80, 0.4, 0.08, 'sawtooth'); tone(120, 0.3, 0.06, 'square'); }
+export function playRiftShockwaveBurst(): void { tone(60, 0.5, 0.07, 'sine'); tone(100, 0.35, 0.05, 'triangle'); }

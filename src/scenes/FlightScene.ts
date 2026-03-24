@@ -335,6 +335,10 @@ import {
   playBossTelegraph,
   playBossAttack,
   playBossDefeated,
+  playRiftActivate,
+  playRiftDeactivate,
+  playRiftEmpPulse,
+  playRiftShockwaveBurst,
 } from '../game/audio';
 import {
   createMusicDirector,
@@ -1276,9 +1280,11 @@ export class FlightScene {
       const def = getRiftDef(riftType);
       this.waveAnnouncement = `${def.icon} ${def.displayName} — ${def.description}`;
       this.setupRiftVisuals(riftState);
+      playRiftActivate();
     } else if (this.arenaRift) {
       this.arenaRift.wavesRemaining -= 1;
       if (this.arenaRift.wavesRemaining <= 0) {
+        playRiftDeactivate();
         this.clearRiftVisuals();
         this.arenaRift = null;
       }
@@ -3261,6 +3267,68 @@ export class FlightScene {
         ctx.moveTo(bx, by);
         ctx.lineTo(endX, endY);
         ctx.stroke();
+      }
+    }
+
+    // Arena rift minimap indicators
+    if (this.arenaRift) {
+      const rift = this.arenaRift.rift;
+      const rDef = getRiftDef(getRiftType(rift));
+      const cr = parseInt(rDef.color.slice(1, 3), 16);
+      const cg = parseInt(rDef.color.slice(3, 5), 16);
+      const cb = parseInt(rDef.color.slice(5, 7), 16);
+
+      if (rift.kind === 'void_collapse') {
+        const vr = rift.currentRadius * scale;
+        ctx.strokeStyle = `rgba(${cr},${cg},${cb},0.7)`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, vr, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},0.06)`;
+        ctx.beginPath();
+        ctx.arc(cx, cy, ARENA_RADIUS * scale, 0, Math.PI * 2);
+        ctx.arc(cx, cy, vr, 0, Math.PI * 2, true);
+        ctx.fill();
+      } else if (rift.kind === 'gravity_well') {
+        const wx = cx + rift.wellX * scale;
+        const wz = cy + rift.wellZ * scale;
+        const wr = 4 + Math.sin(rift.elapsed * 3) * 1.5;
+        ctx.strokeStyle = `rgba(${cr},${cg},${cb},0.6)`;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(wx, wz, wr, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.strokeStyle = `rgba(${cr},${cg},${cb},0.15)`;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.arc(wx, wz, rift.influenceRadius * scale, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (rift.kind === 'emp_storm') {
+        const pulse = 0.4 + 0.3 * Math.sin(rift.timeSinceLastPulse * 2);
+        const empAlpha = rift.shieldsDisabled ? 0.8 : pulse * 0.3;
+        ctx.strokeStyle = `rgba(${cr},${cg},${cb},${empAlpha})`;
+        ctx.lineWidth = rift.shieldsDisabled ? 3 : 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, ARENA_RADIUS * scale, 0, Math.PI * 2);
+        ctx.stroke();
+        if (rift.shieldsDisabled) {
+          ctx.fillStyle = `rgba(${cr},${cg},${cb},0.04)`;
+          ctx.beginPath();
+          ctx.arc(cx, cy, ARENA_RADIUS * scale, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (rift.kind === 'shockwave') {
+        if (rift.waveActive) {
+          const swr = rift.currentWaveRadius * scale;
+          ctx.strokeStyle = `rgba(${cr},${cg},${cb},0.5)`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(cx, cy, swr, 0, Math.PI * 2);
+          ctx.stroke();
+        }
       }
     }
 
@@ -5863,6 +5931,7 @@ export class FlightScene {
     // EMP: detect pulse transition for visual flash
     if (updated.kind === 'emp_storm' && updated.shieldsDisabled && prev.kind === 'emp_storm' && !prev.shieldsDisabled) {
       this.empFlashTimer = 0.3;
+      playRiftEmpPulse();
     }
 
     // Void collapse: damage ships outside safe zone
@@ -5875,8 +5944,11 @@ export class FlightScene {
       this.applyRiftGravityForces(updated, dt);
     }
 
-    // Shockwave: apply force at wave front
+    // Shockwave: detect burst + apply force at wave front
     if (updated.kind === 'shockwave') {
+      if (updated.waveActive && prev.kind === 'shockwave' && !prev.waveActive) {
+        playRiftShockwaveBurst();
+      }
       this.applyRiftShockwaveForces(updated, dt);
     }
   }
