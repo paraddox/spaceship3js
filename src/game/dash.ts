@@ -107,7 +107,7 @@ export function updateDash(state: DashState, dt: number): DashState {
 
   if (state.active) {
     const newTimer = state.dashTimer - dt;
-    const stillActive = newTimer > 0;
+    const stillActive = newTimer > INVULN_EPSILON;
 
     return {
       ...state,

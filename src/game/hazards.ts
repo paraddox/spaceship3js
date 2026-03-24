@@ -120,7 +120,6 @@ export interface ShipHazardResult {
   pushZ: number;
 }
 
-const CONDUIT_COOLDOWN = 3; // seconds per ship between conduit uses
 
 export function applyShipHazardCollision(
   hazard: HazardState,

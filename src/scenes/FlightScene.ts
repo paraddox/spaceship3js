@@ -73,6 +73,17 @@ import {
 } from '../game/simulation';
 import { ParticleSystem, createScreenShake, updateScreenShake, type ScreenShakeState } from '../game/particles';
 import {
+  spawnDamageNumber,
+  flashHit,
+  spawnMuzzleFlash,
+  spawnDeathExplosion,
+  tickFloatingTexts,
+  tickMuzzleFlashes,
+  tickDeathExplosions,
+  disposeCombatFeedback,
+  type CombatFeedbackState,
+} from '../game/combat-feedback';
+import {
   createHazardStates,
   updateHazard,
   applyShipHazardCollision,
@@ -201,6 +212,8 @@ import {
   getAffixColor,
   eliteCreditsMultiplier,
   affixDisplayLabel,
+  rollAffixes,
+  getAvailableAffixes,
   type RolledAffix,
 } from '../game/elite-affixes';
 import {
@@ -558,6 +571,7 @@ export class FlightScene {
   private playerBuffs: ActiveBuff[] = [];
   private dashState: DashState = createDashState();
   private comboState: ComboState = createComboState();
+  private combatFeedback: CombatFeedbackState = { floatingTexts: [], muzzleFlashes: [], deathExplosions: [] };
   private overdriveState: OverdriveState = createOverdriveState();
   private crewOrdersState: CrewOrdersState = createCrewOrdersState();
   private crewOrderAnnouncement = '';
@@ -692,6 +706,9 @@ export class FlightScene {
     this.updateProjectiles(enemyDt);
     this.updateEffects(enemyDt);
     this.particles.update(dt);
+    tickFloatingTexts(this.combatFeedback, dt, this.scene);
+    tickMuzzleFlashes(this.combatFeedback, dt, this.scene);
+    tickDeathExplosions(this.combatFeedback, dt, this.scene);
     this.updateThrustTrails(dt);
     this.updateScreenShake(dt);
     this.coolShips(dt);
@@ -825,6 +842,7 @@ export class FlightScene {
     canvas.removeEventListener('pointerdown', this.onPointerDown);
     canvas.removeEventListener('pointerup', this.onPointerUp);
     destroyMusicAudio();
+    disposeCombatFeedback(this.combatFeedback, this.scene);
     this.uiRoot.innerHTML = '';
   }
 
@@ -1170,8 +1188,20 @@ export class FlightScene {
       this.ships.push(runtimeShip);
       this.spawnDronesForShip(runtimeShip);
       // Apply elite affix stat modifications
-      if (enemy.affixes && enemy.affixes.length > 0) {
-        this.applyAffixMods(runtimeShip, enemy.affixes);
+      const combinedAffixes = [...(enemy.affixes ?? [])];
+      // Crisis: Neural Link — enemies gain +1 extra affix
+      const extraCount = getExtraEnemyAffixes(this.crisisState.activeEffects);
+      if (extraCount > 0 && this.isEndlessMode) {
+        const existingIds = new Set(combinedAffixes.map(a => a.def.id));
+        const pool = getAvailableAffixes(this.currentWave).filter(a => !existingIds.has(a.id));
+        for (let ei = 0; ei < extraCount && pool.length > 0; ei++) {
+          const idx = Math.floor(Math.random() * pool.length);
+          combinedAffixes.push({ def: pool[idx] });
+          pool.splice(idx, 1);
+        }
+      }
+      if (combinedAffixes.length > 0) {
+        this.applyAffixMods(runtimeShip, combinedAffixes);
       }
     }
 
@@ -1292,50 +1322,8 @@ export class FlightScene {
 
     const forward = new THREE.Vector3(Math.sin(this.player.rotation), 0, Math.cos(this.player.rotation));
     const right = new THREE.Vector3(Math.cos(this.player.rotation), 0, -Math.sin(this.player.rotation));
-    const forwardInput = Number(this.keys.has('KeyW')) - Number(this.keys.has('KeyS'));
-    const strafeInput = Number(this.keys.has('KeyD')) - Number(this.keys.has('KeyA'));
-    const crisisThrustMult = getPlayerThrustMult(this.crisisState.activeEffects);
-    const effectiveThrust = getEffectiveThrust(
-      Math.max(4, this.player.stats.thrust / 70 * crisisThrustMult * getPilotThrustMultiplier(this.crewOrdersState, this.player.blueprint.crew)),
-      this.player.powerFactor,
-      this.player.heat,
-      this.player.stats.heatCapacity,
-    ) * (isAfterburning(this.player.abilities) ? 2.5 : 1);
 
-    const acceleration = forward
-      .multiplyScalar(forwardInput * effectiveThrust)
-      .add(right.multiplyScalar(strafeInput * effectiveThrust * 0.75));
-    this.player.velocity.addScaledVector(acceleration, dt);
-    this.player.velocity.multiplyScalar(0.985);
-
-    // Apply dash burst movement
-    if (isDashing(this.dashState)) {
-      this.player.velocity.x = this.dashState.dashDirX * this.player.stats.thrust * this.dashState.speedMultiplier / 50;
-      this.player.velocity.z = this.dashState.dashDirZ * this.player.stats.thrust * this.dashState.speedMultiplier / 50;
-    }
-
-    this.player.position.addScaledVector(this.player.velocity, dt);
-
-    this.clampToArena(this.player.position);
-
-    if (this.fireHeld) {
-      this.tryFire(this.player, this.mouseWorld.clone().sub(this.player.position).normalize());
-    }
-
-    // ── Ability hotkeys ──
-    this.tryPlayerAbility('Digit1', 'shield_boost');
-    this.tryPlayerAbility('Digit2', 'afterburner');
-    this.tryPlayerAbility('Digit3', 'overcharge');
-    this.tryPlayerAbility('Digit4', 'emergency_repair');
-
-    // ── Crew Orders ──
-    this.tryCrewOrder('pilot_surge');
-    this.tryCrewOrder('gunner_focus');
-    this.tryCrewOrder('engineer_reroute');
-    this.tryCrewOrder('tactician_link');
-
-    // ── Dash (Space) ──
-    // Move dash input before movement so the first frame of dash is not wasted
+    // ── Dash (Space) — before velocity so the first frame of dash is not wasted ──
     if (this.keys.has('Space') && canDash(this.dashState)) {
       const shipRot = this.player.group.rotation.y;
       const crisisDashMult = getDashCooldownMult(this.crisisState.activeEffects);
@@ -1394,6 +1382,48 @@ export class FlightScene {
       }
     }
     this.dashState = updateDash(this.dashState, dt);
+
+    const forwardInput = Number(this.keys.has('KeyW')) - Number(this.keys.has('KeyS'));
+    const strafeInput = Number(this.keys.has('KeyD')) - Number(this.keys.has('KeyA'));
+    const crisisThrustMult = getPlayerThrustMult(this.crisisState.activeEffects);
+    const effectiveThrust = getEffectiveThrust(
+      Math.max(4, this.player.stats.thrust / 70 * crisisThrustMult * getPilotThrustMultiplier(this.crewOrdersState, this.player.blueprint.crew)),
+      this.player.powerFactor,
+      this.player.heat,
+      this.player.stats.heatCapacity,
+    ) * (isAfterburning(this.player.abilities) ? 2.5 : 1);
+
+    const acceleration = forward
+      .multiplyScalar(forwardInput * effectiveThrust)
+      .add(right.multiplyScalar(strafeInput * effectiveThrust * 0.75));
+    this.player.velocity.addScaledVector(acceleration, dt);
+    this.player.velocity.multiplyScalar(0.985);
+
+    // Apply dash burst movement
+    if (isDashing(this.dashState)) {
+      this.player.velocity.x = this.dashState.dashDirX * this.player.stats.thrust * this.dashState.speedMultiplier / 50;
+      this.player.velocity.z = this.dashState.dashDirZ * this.player.stats.thrust * this.dashState.speedMultiplier / 50;
+    }
+
+    this.player.position.addScaledVector(this.player.velocity, dt);
+
+    this.clampToArena(this.player.position);
+
+    if (this.fireHeld) {
+      this.tryFire(this.player, this.mouseWorld.clone().sub(this.player.position).normalize());
+    }
+
+    // ── Ability hotkeys ──
+    this.tryPlayerAbility('Digit1', 'shield_boost');
+    this.tryPlayerAbility('Digit2', 'afterburner');
+    this.tryPlayerAbility('Digit3', 'overcharge');
+    this.tryPlayerAbility('Digit4', 'emergency_repair');
+
+    // ── Crew Orders ──
+    this.tryCrewOrder('pilot_surge');
+    this.tryCrewOrder('gunner_focus');
+    this.tryCrewOrder('engineer_reroute');
+    this.tryCrewOrder('tactician_link');
 
     // ── Overdrive (V) ──
     if (this.keys.has('KeyV') && canActivateOverdrive(this.overdriveState)) {
@@ -1724,7 +1754,7 @@ export class FlightScene {
       ? getDamageMultiplier(this.playerBuffs)
         * this.effectiveStats.damageMultiplier
         * getOverdriveDamageMult(this.overdriveState)
-        * getOverchargeDamageMult(this.crisisState.activeEffects)
+        * (isOvercharged(this.player.abilities) ? getOverchargeDamageMult(this.crisisState.activeEffects) : 1)
         * lastStand.damageMult
         * momentumMult
         * this.mutagenStats.damageMultiplier
@@ -1739,6 +1769,9 @@ export class FlightScene {
     const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier * wingmanDamageMult * nebulaDashBoost);
 
     if (weapon.archetype === 'beam') {
+      // Muzzle flash for beam weapons
+      const beamOrigin = ship.position.clone().add(normalizedDirection.clone().multiplyScalar(ship.radius));
+      spawnMuzzleFlash(this.combatFeedback, this.scene, beamOrigin, weapon.damageType === 'energy' ? 0x88ccff : 0xffaa33);
       this.fireBeam(ship, normalizedDirection, weapon, damage, focusTargetId, focusDamageMult, {
         ownerId: ship.id,
         isWingman: !!ship.isWingman,
@@ -1778,6 +1811,10 @@ export class FlightScene {
     projectile.mesh.position.copy(computeProjectileSpawnPosition(ship.position, spreadDirection, ship.radius));
     projectile.mesh.scale.setScalar(weapon.archetype === 'missile' ? 1.5 : weapon.archetype === 'laser' ? 0.9 : 1.1);
     (projectile.mesh.material as THREE.MeshBasicMaterial).color.set(getProjectileColor(ship.team, weapon.archetype));
+
+    // Muzzle flash for projectile weapons
+    spawnMuzzleFlash(this.combatFeedback, this.scene, projectile.mesh.position.clone(),
+      weapon.damageType === 'energy' ? 0x88ccff : weapon.archetype === 'missile' ? 0xff6644 : 0xffaa33);
 
     ship.cooldown = 1 / effectiveCadence;
     ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + weapon.heat);
@@ -2061,6 +2098,15 @@ export class FlightScene {
 
     // Route hull damage through module system
     if (result.hullDamage > 0) {
+      // Combat feedback: floating damage number + hit flash
+      spawnDamageNumber(
+        this.combatFeedback,
+        ship.position.clone(),
+        result.hullDamage,
+        rawDamage > (ship.stats.maxHp * 0.15),
+      );
+      flashHit(ship.group);
+
       if (result.shieldAbsorbed <= 0) {
         this.spawnImpactVisual(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185');
         this.particles.emit(ParticleSystem.hitSpark(ship.position, ship.team === 'player' ? '#f59e0b' : '#fb7185'));
@@ -2118,6 +2164,8 @@ export class FlightScene {
       ship.group.visible = false;
       playExplosion();
       this.spawnExplosionVisual(ship.position, ship.team === 'player' ? '#fca5a5' : '#fb923c');
+      // Combat feedback: 3D debris explosion
+      spawnDeathExplosion(this.combatFeedback, this.scene, ship.position.clone(), ship.isBoss ? 24 : 12);
       // Particle death explosion (skip for player with explosive mutagen — that path has its own emit)
       const playerHasDeathExplosion = isPlayerShip && hasDeathExplosion(this.mutagenState.mutations);
       if (!playerHasDeathExplosion) {
@@ -3697,7 +3745,7 @@ export class FlightScene {
 
         // Nebula velocity slow — applies to all ships (skip while dashing for player)
         if (hazard.kind === 'damage_nebula' && result.damageTaken > 0) {
-          const isDashingThrough = ship.id === this.player.id && isDashing(this.dashState);
+          const isDashingThrough = ship.id === this.player.id && isInvulnerable(this.dashState);
           if (!isDashingThrough) {
             ship.velocity.multiplyScalar(0.92);
           } else if (this.dashState.nebulaBoostRemaining <= 0) {
