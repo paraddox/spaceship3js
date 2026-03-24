@@ -149,6 +149,8 @@ import {
   isInvulnerable,
   isDashing,
   getDashProgress,
+  triggerNebulaBoost,
+  triggerConduitRestore,
   type DashState,
 } from '../game/dash';
 import {
@@ -546,6 +548,8 @@ export class FlightScene {
   private readonly hazardGroup = new THREE.Group();
   private readonly hazards: HazardState[] = [];
   private readonly hazardMeshes = new Map<string, THREE.Object3D>();
+  /** Per-ship nebula shield drain multiplier, written by updateShipHazards and read by shield recharge. */
+  private readonly shipNebulaDrain = new Map<string, number>();
 
   // Pickups
   private readonly pickupGroup = new THREE.Group();
@@ -707,8 +711,40 @@ export class FlightScene {
     }
     if (this.crisisDashGhostTimer > 0) {
       this.crisisDashGhostTimer -= dt;
+      // Ghost auto-fires at the nearest enemy
+      if (this.crisisDashGhostShip && this.crisisDashGhostShip.alive) {
+        const ghost = this.crisisDashGhostShip;
+        ghost.cooldown = Math.max(0, ghost.cooldown - dt);
+        if (ghost.cooldown <= 0 && ghost.weapons.length > 0) {
+          const nearest = this.findNearestEnemy(ghost);
+          if (nearest) {
+            const dir = new THREE.Vector3().subVectors(nearest.position, ghost.position).normalize();
+            this.tryFire(ghost, dir);
+            ghost.cooldown = 0.5;
+          }
+        }
+        // Fade ghost opacity as timer runs down
+        const fadeFrac = Math.min(1, this.crisisDashGhostTimer);
+        ghost.group.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const mesh = child as THREE.Mesh;
+            if (mesh.material instanceof THREE.Material) {
+              mesh.material.opacity = 0.35 * fadeFrac;
+            }
+          }
+        });
+      }
       if (this.crisisDashGhostTimer <= 0) {
         this.crisisDashGhostTimer = 0;
+        if (this.crisisDashGhostShip) {
+          this.scene.remove(this.crisisDashGhostShip.group);
+          this.crisisDashGhostShip.group.traverse((child) => {
+            const mesh = child as THREE.Mesh;
+            if (mesh.isMesh && mesh.material instanceof THREE.Material) {
+              mesh.material.dispose();
+            }
+          });
+        }
         this.crisisDashGhostShip = null;
       }
     }
@@ -1043,7 +1079,7 @@ export class FlightScene {
     this.player.stats.maxHp = Math.round(this.player.stats.maxHp * mutagenMods.maxHpMultiplier * mutagenStatMult);
     this.player.stats.shieldStrength = Math.round(this.player.stats.shieldStrength * mutagenMods.shieldMultiplier * mutagenStatMult);
     this.player.stats.thrust *= mutagenMods.thrustMultiplier * mutagenStatMult;
-    this.player.stats.armorRating += mutagenMods.armorBonus * mutagenStatMult;
+    this.player.stats.armorRating += Math.round(mutagenMods.armorBonus * mutagenStatMult);
     this.player.maxShield = this.player.stats.shieldStrength;
     this.player.shield = Math.min(this.player.shield, this.player.maxShield);
     this.player.hp = Math.min(this.player.hp, this.player.stats.maxHp);
@@ -1280,16 +1316,6 @@ export class FlightScene {
 
     this.player.position.addScaledVector(this.player.velocity, dt);
 
-    // Nebula slow: reduce velocity when player is inside a damage nebula
-    for (const hazard of this.hazards) {
-      if (hazard.kind !== 'damage_nebula') continue;
-      const dist = Math.hypot(this.player.position.x - hazard.x, this.player.position.z - hazard.z);
-      if (dist < hazard.radius + this.player.radius * 0.45) {
-        this.player.velocity.multiplyScalar(0.92);
-        break;
-      }
-    }
-
     this.clampToArena(this.player.position);
 
     if (this.fireHeld) {
@@ -1320,6 +1346,52 @@ export class FlightScene {
       );
       if (this.isEndlessMode) this.runStats.dashCount += 1;
       this.particles.emit(ParticleSystem.dashBurst(this.player.position));
+      // Crisis: Time Echo — spawn a ghost copy at dash origin that auto-fires
+      const ghostDuration = getDashGhostDuration(this.crisisState.activeEffects);
+      if (ghostDuration > 0 && !this.crisisDashGhostShip) {
+        // Clone the player's group for a visual ghost
+        const ghostGroup = this.player.group.clone();
+        ghostGroup.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const mesh = child as THREE.Mesh;
+            if (mesh.material instanceof THREE.Material) {
+              const mat = mesh.material.clone();
+              mat.transparent = true;
+              mat.opacity = 0.35;
+              if ('color' in mat) (mat as THREE.MeshBasicMaterial).color.set('#a78bfa');
+              mesh.material = mat;
+            }
+          }
+        });
+        this.scene.add(ghostGroup);
+        this.crisisDashGhostShip = {
+          id: 'dash-ghost',
+          team: 'player',
+          alive: true,
+          hp: 1,
+          position: this.player.position.clone(),
+          velocity: new THREE.Vector3(),
+          rotation: this.player.rotation,
+          group: ghostGroup,
+          radius: this.player.radius,
+          blueprint: this.player.blueprint,
+          weapons: [...this.player.weapons],
+          weaponIndex: 0,
+          abilities: [],
+          moduleStates: [],
+          moduleMeshes: new Map(),
+          stats: { ...this.player.stats },
+          maxShield: 0,
+          shield: 0,
+          heat: 0,
+          cooldown: 0,
+          preferredRange: 15,
+          fireJitter: 0.05,
+          powerFactor: 1,
+          isWingman: false,
+        };
+        this.crisisDashGhostTimer = ghostDuration;
+      }
     }
     this.dashState = updateDash(this.dashState, dt);
 
@@ -1663,7 +1735,8 @@ export class FlightScene {
       ? getGunnerFocusDamageMultiplier(this.crewOrdersState, playerCrew, focusTargetId)
       : 1;
     const wingmanDamageMult = ship.isWingman ? WINGMAN_DAMAGE_MULT : 1;
-    const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier * wingmanDamageMult);
+    const nebulaDashBoost = ship.id === this.player.id && this.dashState.nebulaBoostRemaining > 0 ? 2 : 1;
+    const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier * wingmanDamageMult * nebulaDashBoost);
 
     if (weapon.archetype === 'beam') {
       this.fireBeam(ship, normalizedDirection, weapon, damage, focusTargetId, focusDamageMult, {
@@ -2010,6 +2083,7 @@ export class FlightScene {
       if (ship.isBoss && ship.bossHpMult) {
         ship.stats.maxHp *= ship.bossHpMult;
       }
+      this.reapplyUpgradeBonuses(ship);
       this.reapplyLegacyOnRebuild(ship);
       this.reapplyMutagenOnRebuild(ship);
       ship.powerFactor = computePowerFactor(ship.stats.powerOutput, ship.stats.powerDemand);
@@ -2305,18 +2379,8 @@ export class FlightScene {
         : 1;
       const cooling = computeCoolingPerSecond(Math.max(2, ship.stats.cooling * 80 * engineerCooling), ship.powerFactor);
       ship.heat = Math.max(0, ship.heat - cooling * dt);
-      // Check if ship is inside a nebula — drain shields at 2x rate inside nebula
-      let shieldDrainMult = 1;
-      if (ship.maxShield > 0) {
-        for (const hazard of this.hazards) {
-          if (hazard.kind !== 'damage_nebula') continue;
-          const dist = Math.hypot(ship.position.x - hazard.x, ship.position.z - hazard.z);
-          if (dist < hazard.radius + ship.radius * 0.45) {
-            shieldDrainMult = 2; // Nebula doubles shield drain
-            break;
-          }
-        }
-      }
+      // Check if ship is inside a nebula — use drain multiplier from hazard system
+      const shieldDrainMult = this.shipNebulaDrain.get(ship.id) ?? 1;
       ship.shield = rechargeShield(
         ship.shield,
         ship.maxShield,
@@ -3616,6 +3680,7 @@ export class FlightScene {
 
   private updateShipHazards(dt: number): void {
     const now = performance.now() / 1000;
+    this.shipNebulaDrain.clear();
 
     for (const ship of this.ships) {
       if (!ship.alive) continue;
@@ -3624,6 +3689,31 @@ export class FlightScene {
         const result = applyShipHazardCollision(
           hazard, ship.id, ship.position.x, ship.position.z, ship.radius * 0.45, dt, now,
         );
+
+        // Cache nebula shield drain multiplier for the recharge loop
+        if (result.shieldDrainMultiplier > 1) {
+          this.shipNebulaDrain.set(ship.id, result.shieldDrainMultiplier);
+        }
+
+        // Nebula velocity slow — applies to all ships (skip while dashing for player)
+        if (hazard.kind === 'damage_nebula' && result.damageTaken > 0) {
+          const isDashingThrough = ship.id === this.player.id && isDashing(this.dashState);
+          if (!isDashingThrough) {
+            ship.velocity.multiplyScalar(0.92);
+          } else if (this.dashState.nebulaBoostRemaining <= 0) {
+            // Dash-through interaction: 2x projectile damage boost for 2s
+            this.dashState = triggerNebulaBoost(this.dashState);
+          }
+        }
+
+        // Conduit dash-through interaction: instant full shield recharge (once per dash)
+        if (hazard.kind === 'shield_conduit' && result.shieldRestored > 0
+            && ship.id === this.player.id && isInvulnerable(this.dashState)
+            && !this.dashState.conduitRestoreApplied) {
+          this.dashState = triggerConduitRestore(this.dashState);
+          this.player.shield = this.player.maxShield;
+          this.particles.emit(ParticleSystem.shieldAbsorb(this.player.position, '#38bdf8'));
+        }
 
         // Asteroid push (skip during dash — phase through)
         const isPlayerDashing = ship.id === this.player.id && isDashing(this.dashState);
@@ -4488,51 +4578,51 @@ export class FlightScene {
   }
 
   /**
-   * Rebuild player stats by recomputing base stats from blueprint
-   * and applying all accumulated upgrade bonuses on top.
+   * Rebuild player stats from surviving modules + all bonus layers.
+   * Must follow the same modifier chain as the module-breakage path in applyDamage:
+   *   base (surviving modules) → crew → upgrades → legacy → mutagen
    */
   private rebuildPlayerWithUpgrades(): void {
-    const s = this.effectiveStats;
-    const baseStats = applyCrewModifiers(computeShipStats(this.player.blueprint), this.player.blueprint.crew);
+    // Reset to base stats from surviving modules (same as module-breakage path)
+    const survivingIds = new Set(this.player.moduleStates.filter((m) => !m.destroyed).map((m) => m.instanceId));
+    const newRawStats = computeStatsFromSurviving(this.player.blueprint, survivingIds);
+    this.player.stats = applyCrewModifiers(newRawStats, this.player.blueprint.crew);
 
-    // Start from base stats
-    this.player.stats = { ...baseStats };
+    // Apply accumulated upgrade bonuses (includes mutator stat mods via effectiveStats)
+    this.reapplyUpgradeBonuses(this.player);
 
-    // Apply additive bonuses
-    const upgradeStatMult = getUpgradeStatMult(this.crisisState.activeEffects);
-    this.player.stats.maxHp += Math.round(s.maxHpBonus * upgradeStatMult);
-    this.player.stats.shieldStrength += Math.round(s.shieldBonus * upgradeStatMult);
-    this.player.stats.shieldRecharge *= (1 + s.shieldRechargeBonus);
-    this.player.stats.armorRating += Math.round(s.armorRatingBonus * upgradeStatMult);
-    this.player.stats.kineticBypass += s.kineticBypassBonus;
-    this.player.stats.energyVulnerability = Math.max(0, this.player.stats.energyVulnerability - s.energyVulnerabilityReduction);
-    this.player.stats.powerOutput *= (1 + s.powerOutputBonus);
-    this.player.stats.heatCapacity += Math.round(s.heatCapacityBonus * upgradeStatMult);
-    this.player.stats.cooling *= (1 + s.coolingBonus);
-    this.player.stats.thrust *= (1 + s.thrustBonus);
-    this.player.stats.droneCapacity += s.droneCapacityBonus;
+    // Re-apply legacy bonuses that survive rebuilds (bonus_hp, shield_seed, heat_sink)
+    this.reapplyLegacyOnRebuild(this.player);
+
+    // Apply mutagen multipliers (order matches module-breakage path: legacy before mutagen)
+    this.reapplyMutagenOnRebuild(this.player);
 
     // Recalculate power factor
     this.player.powerFactor = computePowerFactor(this.player.stats.powerOutput, this.player.stats.powerDemand);
 
-    // Update runtime values
-    this.player.maxShield += s.shieldBonus;
-    this.player.shield = Math.min(this.player.shield + s.shieldBonus, this.player.maxShield);
-    this.player.hp = Math.min(this.player.hp + s.maxHpBonus, this.player.stats.maxHp);
     // Clamp HP to at least 1 after stat changes so mutator choices don't instantly kill
-    this.player.hp = Math.max(1, this.player.hp);
-
-    // Apply permanent mutagen stats
-    const mutagenStatMult = getMutagenStatMult(this.crisisState.activeEffects);
-    this.player.stats.maxHp = Math.round(this.player.stats.maxHp * this.mutagenStats.maxHpMultiplier * mutagenStatMult);
-    this.player.stats.shieldStrength = Math.round(this.player.stats.shieldStrength * this.mutagenStats.shieldMultiplier * mutagenStatMult);
-    this.player.stats.thrust *= this.mutagenStats.thrustMultiplier * mutagenStatMult;
-    this.player.stats.armorRating += Math.round(this.mutagenStats.armorBonus * mutagenStatMult);
-    // Re-apply legacy bonuses that survive rebuilds (bonus_hp, shield_seed, heat_sink)
-    this.reapplyLegacyOnRebuild(this.player);
+    this.player.hp = Math.max(1, Math.min(this.player.hp, this.player.stats.maxHp));
     this.player.maxShield = this.player.stats.shieldStrength;
     this.player.shield = Math.min(this.player.shield, this.player.maxShield);
     this.player.hp = Math.min(this.player.hp, this.player.stats.maxHp);
+  }
+
+  /** Apply upgrade shop bonuses to a ship's stats (called after every stat rebuild). */
+  private reapplyUpgradeBonuses(ship: RuntimeShip): void {
+    if (ship.id !== this.player.id) return;
+    const s = this.effectiveStats;
+    const upgradeStatMult = getUpgradeStatMult(this.crisisState.activeEffects);
+    ship.stats.maxHp += Math.round(s.maxHpBonus * upgradeStatMult);
+    ship.stats.shieldStrength += Math.round(s.shieldBonus * upgradeStatMult);
+    ship.stats.shieldRecharge *= (1 + s.shieldRechargeBonus);
+    ship.stats.armorRating += Math.round(s.armorRatingBonus * upgradeStatMult);
+    ship.stats.kineticBypass += s.kineticBypassBonus;
+    ship.stats.energyVulnerability = Math.max(0, ship.stats.energyVulnerability - s.energyVulnerabilityReduction);
+    ship.stats.powerOutput *= (1 + s.powerOutputBonus);
+    ship.stats.heatCapacity += Math.round(s.heatCapacityBonus * upgradeStatMult);
+    ship.stats.cooling *= (1 + s.coolingBonus);
+    ship.stats.thrust *= (1 + s.thrustBonus);
+    ship.stats.droneCapacity += s.droneCapacityBonus;
   }
 
   private renderComboHud(): string {
@@ -4804,13 +4894,11 @@ export class FlightScene {
           this.endlessCredits += effect.value;
           break;
         case 'bonus_shield':
-          if (this.player.maxShield > 0) {
-            this.player.shield += effect.value;
-            this.player.maxShield += effect.value;
-          } else {
-            this.player.shield = effect.value;
-            this.player.maxShield = effect.value;
-          }
+          // Modify stats.shieldStrength so the downstream mutagen
+          // application (`maxShield = shieldStrength`) preserves it.
+          this.player.stats.shieldStrength += effect.value;
+          this.player.maxShield += effect.value;
+          this.player.shield += effect.value;
           break;
         case 'heat_capacity':
           this.player.stats.heatCapacity *= (1 + effect.value / 100);
@@ -4843,14 +4931,15 @@ export class FlightScene {
     const persistent = getRebuildPersistentEffects(this.legacyState);
     for (const bonus of persistent) {
       switch (bonus.effect.kind) {
-        case 'bonus_hp':
-          ship.stats.maxHp += this.legacyFlatHpBonus;
+        case 'bonus_hp': {
+          const bonusHp = Math.round(ship.stats.maxHp * (bonus.effect.value / 100));
+          ship.stats.maxHp += bonusHp;
           break;
+        }
         case 'bonus_shield': {
-          if (ship.maxShield > 0) {
-            ship.maxShield += bonus.effect.value;
-            ship.shield = Math.min(ship.shield, ship.maxShield);
-          }
+          // Modify stats.shieldStrength so that the caller's
+          // `ship.maxShield = ship.stats.shieldStrength` preserves the bonus.
+          ship.stats.shieldStrength += bonus.effect.value;
           break;
         }
         case 'heat_capacity':
@@ -4863,11 +4952,12 @@ export class FlightScene {
   /** Re-apply mutagen stat multipliers after module rebuilds so they stay coherent. */
   private reapplyMutagenOnRebuild(ship: RuntimeShip): void {
     if (ship.id !== this.player.id) return;
-    const mutagenStatMult = getMutagenStatMult(this.crisisState.activeEffects);
-    ship.stats.maxHp = Math.round(ship.stats.maxHp * this.mutagenStats.maxHpMultiplier * mutagenStatMult);
-    ship.stats.shieldStrength = Math.round(ship.stats.shieldStrength * this.mutagenStats.shieldMultiplier * mutagenStatMult);
-    ship.stats.thrust *= this.mutagenStats.thrustMultiplier * mutagenStatMult;
-    ship.stats.armorRating += Math.round(this.mutagenStats.armorBonus * mutagenStatMult);
+    const crisisMult = getMutagenStatMult(this.crisisState.activeEffects);
+    ship.stats.maxHp = Math.round(ship.stats.maxHp * this.mutagenStats.maxHpMultiplier * crisisMult);
+    ship.stats.shieldStrength = Math.round(ship.stats.shieldStrength * this.mutagenStats.shieldMultiplier * crisisMult);
+    ship.stats.thrust *= this.mutagenStats.thrustMultiplier * crisisMult;
+    ship.stats.armorRating += Math.round(this.mutagenStats.armorBonus * crisisMult);
+    ship.hp = Math.min(ship.hp, ship.stats.maxHp);
   }
 
   private finalizeLegacyRun(snapshot: RunSnapshot): void {

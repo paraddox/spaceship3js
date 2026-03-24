@@ -132,6 +132,14 @@ export function isDashing(state: DashState): boolean {
   return state.active;
 }
 
+export function triggerNebulaBoost(state: DashState): DashState {
+  return { ...state, nebulaBoostRemaining: 2 };
+}
+
+export function triggerConduitRestore(state: DashState): DashState {
+  return { ...state, conduitRestoreApplied: true };
+}
+
 export function getDashProgress(state: DashState): number {
   if (state.active) return 1;
   if (state.cooldownRemaining <= 0) return 1;
