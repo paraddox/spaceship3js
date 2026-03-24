@@ -460,14 +460,13 @@ interface RuntimeShip {
   protectedTarget?: boolean;
   escortOrigin?: THREE.Vector3;
   weapons: WeaponProfile[];
-  weaponIndex: number;
+  weaponCooldowns: number[];
   group: THREE.Group;
   position: THREE.Vector3;
   velocity: THREE.Vector3;
   rotation: number;
   hp: number;
   heat: number;
-  cooldown: number;
   shield: number;
   maxShield: number;
   radius: number;
@@ -839,13 +838,13 @@ export class FlightScene {
       // Ghost auto-fires at the nearest enemy
       if (this.crisisDashGhostShip && this.crisisDashGhostShip.alive) {
         const ghost = this.crisisDashGhostShip;
-        ghost.cooldown = Math.max(0, ghost.cooldown - dt);
-        if (ghost.cooldown <= 0 && ghost.weapons.length > 0) {
+        ghost.weaponCooldowns = ghost.weaponCooldowns.map(c => Math.max(0, c - dt));
+        if (ghost.weaponCooldowns.some(c => c <= 0) && ghost.weapons.length > 0) {
           const nearest = this.findNearestEnemy(ghost);
           if (nearest) {
             const dir = new THREE.Vector3().subVectors(nearest.position, ghost.position).normalize();
             this.tryFire(ghost, dir);
-            ghost.cooldown = 0.5;
+            ghost.weaponCooldowns = ghost.weaponCooldowns.map(() => 0.5);
           }
         }
         // Fade ghost opacity as timer runs down
@@ -1479,14 +1478,13 @@ export class FlightScene {
       protectedTarget,
       escortOrigin: protectedTarget ? position.clone() : undefined,
       weapons,
-      weaponIndex: 0,
+      weaponCooldowns: weapons.map(() => 0),
       group,
       position: position.clone(),
       velocity: new THREE.Vector3(),
       rotation,
       hp: Math.max(stats.maxHp, 60),
       heat: 0,
-      cooldown: 0,
       shield: maxShield,
       maxShield,
       radius: computeBlueprintRadius(blueprint),
@@ -1563,7 +1561,7 @@ export class FlightScene {
           radius: this.player.radius,
           blueprint: this.player.blueprint,
           weapons: [...this.player.weapons],
-          weaponIndex: 0,
+          weaponCooldowns: [...this.player.weaponCooldowns],
           abilities: [],
           moduleStates: [],
           moduleMeshes: new Map(),
@@ -1571,11 +1569,9 @@ export class FlightScene {
           maxShield: 0,
           shield: 0,
           heat: 0,
-          cooldown: 0,
           preferredRange: 15,
           fireJitter: 0.05,
           powerFactor: 1,
-          isWingman: false,
         };
         this.crisisDashGhostTimer = ghostDuration;
       }
@@ -1932,12 +1928,7 @@ export class FlightScene {
 
   private tryFire(ship: RuntimeShip, direction: THREE.Vector3): void {
     if (!ship.alive || ship.weapons.length === 0) return;
-    if (ship.cooldown > 0) return;
     if (isOverheated(ship.heat, ship.stats.heatCapacity * 1.02)) return;
-
-    const weapon = ship.weapons[ship.weaponIndex % ship.weapons.length];
-    if (!weapon) return;
-    ship.weaponIndex = (ship.weaponIndex + 1) % ship.weapons.length;
 
     // Mutator: Last Stand fire rate boost
     const playerCrew = this.player.blueprint.crew;
@@ -1960,15 +1951,6 @@ export class FlightScene {
         * getTacticianCadenceMultiplier(this.crewOrdersState, playerCrew)
         * this.sigilEffects.fireRateMult
       : (ship.affixFireRateMult ?? 1) * (bossPhaseMult?.fireRateMult ?? 1);
-    const effectiveCadence = getEffectiveWeaponCadence(
-      Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
-      ship.powerFactor,
-      ship.heat,
-      ship.stats.heatCapacity,
-    ) * cadenceBuff;
-    if (effectiveCadence <= 0.05) return;
-
-    const normalizedDirection = direction.clone().normalize();
     const momentumMult = ship.team === 'player' ? momentumDamageMult(this.activeMutators, ship.velocity.length()) : 1;
     const crisisDamage = this.crisisEliteKillBuffTimer > 0 ? getEliteKillDamageBuff(this.crisisState.activeEffects) : 1;
     const buffMultiplier = ship.team === 'player'
@@ -1988,112 +1970,126 @@ export class FlightScene {
       : 1;
     const wingmanDamageMult = ship.isWingman ? WINGMAN_DAMAGE_MULT : 1;
     const nebulaDashBoost = ship.id === this.player.id && this.dashState.nebulaBoostRemaining > 0 ? 2 : 1;
-    let damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier * wingmanDamageMult * nebulaDashBoost);
 
-    // Sigil: Entropy Field — crit chance
-    if (ship.id === this.player.id && this.sigilEffects.critChance > 0 && Math.random() < this.sigilEffects.critChance) {
-      damage *= 2;
-      spawnDamageNumber(this.combatFeedback, ship.position.clone().add(new THREE.Vector3(0, 1, 0)), damage, true);
-    }
+    const normalizedDirection = direction.clone().normalize();
 
-    // Sigil: Warp Lance — focus damage (consecutive hits on same target)
-    if (ship.id === this.player.id && this.sigilEffects.focusDamagePctPerHit > 0) {
-      // The target is implicit from the direction — use the nearest enemy in that direction
-      const aimTarget = this.findNearestEnemy(ship);
-      if (aimTarget) {
-        if (this.sigilFocusTarget !== aimTarget.id) {
-          this.sigilFocusTarget = aimTarget.id;
-          this.sigilFocusHits = 1;
-        } else {
-          this.sigilFocusHits++;
-        }
-        const focusBonus = Math.min(this.sigilEffects.focusDamageMaxPct, this.sigilFocusHits * this.sigilEffects.focusDamagePctPerHit);
-        damage *= (1 + focusBonus / 100);
+    // Fire all weapons that are off cooldown. Each weapon has an independent timer.
+    for (let wi = 0; wi < ship.weapons.length; wi++) {
+      const weapon = ship.weapons[wi];
+      if (!weapon) continue;
+      if (ship.weaponCooldowns[wi] > 0) continue;
+
+      const effectiveCadence = getEffectiveWeaponCadence(
+        Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
+        ship.powerFactor,
+        ship.heat,
+        ship.stats.heatCapacity,
+      ) * cadenceBuff;
+      if (effectiveCadence <= 0.05) continue;
+
+      let damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier * wingmanDamageMult * nebulaDashBoost);
+
+      // Sigil: Entropy Field — crit chance
+      if (ship.id === this.player.id && this.sigilEffects.critChance > 0 && Math.random() < this.sigilEffects.critChance) {
+        damage *= 2;
+        spawnDamageNumber(this.combatFeedback, ship.position.clone().add(new THREE.Vector3(0, 1, 0)), damage, true);
       }
-    }
 
-    // Sigil: Warp Lance — warp strike (every Nth shot)
-    let isWarpStrike = false;
-    if (ship.id === this.player.id && this.sigilEffects.warpStrikeInterval > 0) {
-      this.sigilShotCounter++;
-      if (this.sigilShotCounter % this.sigilEffects.warpStrikeInterval === 0) {
-        damage *= this.sigilEffects.warpStrikeDamageMult;
-        isWarpStrike = true;
-        // Teleport to nearest enemy
-        const warpTarget = this.findNearestEnemy(ship);
-        if (warpTarget) {
-          this.player.position.copy(warpTarget.position).add(
-            normalizedDirection.clone().multiplyScalar(-3),
-          );
-          this.syncShipTransform(this.player);
-          for (const config of ParticleSystem.deathExplosion(this.player.position)) {
-            this.particles.emit(config);
+      // Sigil: Warp Lance — focus damage (consecutive hits on same target)
+      if (ship.id === this.player.id && this.sigilEffects.focusDamagePctPerHit > 0) {
+        const aimTarget = this.findNearestEnemy(ship);
+        if (aimTarget) {
+          if (this.sigilFocusTarget !== aimTarget.id) {
+            this.sigilFocusTarget = aimTarget.id;
+            this.sigilFocusHits = 1;
+          } else {
+            this.sigilFocusHits++;
+          }
+          const focusBonus = Math.min(this.sigilEffects.focusDamageMaxPct, this.sigilFocusHits * this.sigilEffects.focusDamagePctPerHit);
+          damage *= (1 + focusBonus / 100);
+        }
+      }
+
+      // Sigil: Warp Lance — warp strike (every Nth shot)
+      let isWarpStrike = false;
+      if (ship.id === this.player.id && this.sigilEffects.warpStrikeInterval > 0) {
+        this.sigilShotCounter++;
+        if (this.sigilShotCounter % this.sigilEffects.warpStrikeInterval === 0) {
+          damage *= this.sigilEffects.warpStrikeDamageMult;
+          isWarpStrike = true;
+          const warpTarget = this.findNearestEnemy(ship);
+          if (warpTarget) {
+            this.player.position.copy(warpTarget.position).add(
+              normalizedDirection.clone().multiplyScalar(-3),
+            );
+            this.syncShipTransform(this.player);
+            for (const config of ParticleSystem.deathExplosion(this.player.position)) {
+              this.particles.emit(config);
+            }
           }
         }
+      } else if (ship.id === this.player.id) {
+        this.sigilShotCounter++;
       }
-    } else if (ship.id === this.player.id) {
-      this.sigilShotCounter++;
-    }
 
-    if (weapon.archetype === 'beam') {
-      // Muzzle flash for beam weapons
-      const beamOrigin = ship.position.clone().add(normalizedDirection.clone().multiplyScalar(ship.radius));
-      spawnMuzzleFlash(this.combatFeedback, this.scene, beamOrigin, weapon.damageType === 'energy' ? 0x88ccff : 0xffaa33);
-      this.fireBeam(ship, normalizedDirection, weapon, damage, focusTargetId, focusDamageMult, {
-        ownerId: ship.id,
-        isWingman: !!ship.isWingman,
-      });
-      playBeam();
-      ship.cooldown = weapon.cooldown;
+      if (weapon.archetype === 'beam') {
+        const beamOrigin = ship.position.clone().add(normalizedDirection.clone().multiplyScalar(ship.radius));
+        spawnMuzzleFlash(this.combatFeedback, this.scene, beamOrigin, weapon.damageType === 'energy' ? 0x88ccff : 0xffaa33);
+        this.fireBeam(ship, normalizedDirection, weapon, damage, focusTargetId, focusDamageMult, {
+          ownerId: ship.id,
+          isWingman: !!ship.isWingman,
+        });
+        playBeam();
+        ship.weaponCooldowns[wi] = weapon.cooldown;
+        ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + weapon.heat);
+        continue;
+      }
+
+      const projectile = this.projectiles.find((candidate) => !candidate.active);
+      if (!projectile) continue;
+
+      const spread = weapon.spread;
+      const spreadDirection = normalizedDirection
+        .add(new THREE.Vector3((Math.random() - 0.5) * spread, 0, (Math.random() - 0.5) * spread))
+        .normalize();
+
+      projectile.active = true;
+      projectile.team = ship.team;
+      projectile.archetype = weapon.archetype;
+      projectile.damage = damage;
+      projectile.damageType = weapon.damageType as DamageType;
+      projectile.armorPenetration = weapon.armorPenetration;
+      projectile.ttl = weapon.archetype === 'missile' ? 3.8 : 2.2;
+      projectile.turnRate = weapon.archetype === 'missile' ? 2.8 : 0;
+      projectile.target = weapon.archetype === 'missile' ? this.findNearestEnemy(ship) : null;
+      projectile.focusTargetId = focusTargetId ?? undefined;
+      projectile.focusDamageMult = focusTargetId ? focusDamageMult : undefined;
+      projectile.ownerId = ship.id;
+      projectile.ownerIsWingman = !!ship.isWingman;
+      // Sigil: pierce count (Warp Lance)
+      if (ship.id === this.player.id && this.sigilEffects.pierceCount > 0) {
+        projectile.pierceRemaining = this.sigilEffects.pierceCount;
+      }
+      const crisisEnemyProjMult = getEnemyProjectileSpeedMult(this.crisisState.activeEffects);
+      const sigilProjSpeedMult = ship.team === 'player' ? this.sigilEffects.projectileSpeedMult : 1;
+      projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(
+        (weapon.projectileSpeed + (ship.team === 'player' ? this.effectiveStats.projectileSpeedBonus : 0))
+        * (ship.team === 'enemy' ? crisisEnemyProjMult : 1)
+        * sigilProjSpeedMult, 8)));
+      projectile.mesh.visible = true;
+      projectile.mesh.position.copy(computeProjectileSpawnPosition(ship.position, spreadDirection, ship.radius));
+      projectile.mesh.scale.setScalar(weapon.archetype === 'missile' ? 1.5 : weapon.archetype === 'laser' ? 0.9 : 1.1);
+      (projectile.mesh.material as THREE.MeshBasicMaterial).color.set(getProjectileColor(ship.team, weapon.archetype));
+
+      spawnMuzzleFlash(this.combatFeedback, this.scene, projectile.mesh.position.clone(),
+        weapon.damageType === 'energy' ? 0x88ccff : weapon.archetype === 'missile' ? 0xff6644 : 0xffaa33);
+
+      ship.weaponCooldowns[wi] = 1 / effectiveCadence;
       ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + weapon.heat);
-      return;
+      if (weapon.archetype === 'missile') playMissile();
+      else if (weapon.archetype === 'laser') playLaser();
+      else playShoot();
     }
-
-    const projectile = this.projectiles.find((candidate) => !candidate.active);
-    if (!projectile) return;
-
-    const spread = weapon.spread;
-    const spreadDirection = normalizedDirection
-      .add(new THREE.Vector3((Math.random() - 0.5) * spread, 0, (Math.random() - 0.5) * spread))
-      .normalize();
-
-    projectile.active = true;
-    projectile.team = ship.team;
-    projectile.archetype = weapon.archetype;
-    projectile.damage = damage;
-    projectile.damageType = weapon.damageType as DamageType;
-    projectile.armorPenetration = weapon.armorPenetration;
-    projectile.ttl = weapon.archetype === 'missile' ? 3.8 : 2.2;
-    projectile.turnRate = weapon.archetype === 'missile' ? 2.8 : 0;
-    projectile.target = weapon.archetype === 'missile' ? this.findNearestEnemy(ship) : null;
-    projectile.focusTargetId = focusTargetId ?? undefined;
-    projectile.focusDamageMult = focusTargetId ? focusDamageMult : undefined;
-    projectile.ownerId = ship.id;
-    projectile.ownerIsWingman = !!ship.isWingman;
-    // Sigil: pierce count (Warp Lance)
-    if (ship.id === this.player.id && this.sigilEffects.pierceCount > 0) {
-      projectile.pierceRemaining = this.sigilEffects.pierceCount;
-    }
-    const crisisEnemyProjMult = getEnemyProjectileSpeedMult(this.crisisState.activeEffects);
-    const sigilProjSpeedMult = ship.team === 'player' ? this.sigilEffects.projectileSpeedMult : 1;
-    projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(
-      (weapon.projectileSpeed + (ship.team === 'player' ? this.effectiveStats.projectileSpeedBonus : 0))
-      * (ship.team === 'enemy' ? crisisEnemyProjMult : 1)
-      * sigilProjSpeedMult, 8)));
-    projectile.mesh.visible = true;
-    projectile.mesh.position.copy(computeProjectileSpawnPosition(ship.position, spreadDirection, ship.radius));
-    projectile.mesh.scale.setScalar(weapon.archetype === 'missile' ? 1.5 : weapon.archetype === 'laser' ? 0.9 : 1.1);
-    (projectile.mesh.material as THREE.MeshBasicMaterial).color.set(getProjectileColor(ship.team, weapon.archetype));
-
-    // Muzzle flash for projectile weapons
-    spawnMuzzleFlash(this.combatFeedback, this.scene, projectile.mesh.position.clone(),
-      weapon.damageType === 'energy' ? 0x88ccff : weapon.archetype === 'missile' ? 0xff6644 : 0xffaa33);
-
-    ship.cooldown = 1 / effectiveCadence;
-    ship.heat = Math.min(ship.stats.heatCapacity * 1.4, ship.heat + weapon.heat);
-    if (weapon.archetype === 'missile') playMissile();
-    else if (weapon.archetype === 'laser') playLaser();
-    else playShoot();
   }
 
   private updateProjectiles(dt: number): void {
@@ -2164,7 +2160,7 @@ export class FlightScene {
       for (const ship of this.ships) {
         if (!ship.alive || ship.team === projectile.team) continue;
         const distance = projectile.mesh.position.distanceTo(ship.position);
-        if (distance <= ship.radius * 0.45) {
+        if (distance <= ship.radius * 0.85) {
           const hitAngle = Math.atan2(
             projectile.mesh.position.x - ship.position.x,
             projectile.mesh.position.z - ship.position.z,
@@ -2473,7 +2469,7 @@ export class FlightScene {
         modules: ship.blueprint.modules.filter((m) => survivingIds.has(m.instanceId)),
       };
       ship.weapons = buildWeaponLoadout(survivingBlueprint);
-      ship.weaponIndex = 0;
+      ship.weaponCooldowns = ship.weapons.map(() => 0);
 
       // Darken destroyed module meshes
       for (const id of destroyed) {
@@ -2786,7 +2782,7 @@ export class FlightScene {
 
   private coolShips(dt: number): void {
     for (const ship of this.ships) {
-      ship.cooldown = Math.max(0, ship.cooldown - dt);
+      ship.weaponCooldowns = ship.weaponCooldowns.map(c => Math.max(0, c - dt));
       const engineerCooling = ship.team === 'player'
         ? getEngineerCoolingMultiplier(this.crewOrdersState, this.player.blueprint.crew)
         : 1;
