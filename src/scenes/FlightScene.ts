@@ -3470,7 +3470,7 @@ export class FlightScene {
           ${this.bossAI?.transitioning ? '<span style=\"font-size:0.7em;color:#fbbf24;margin-left:8px">⚡ INVULNERABLE</span>' : ''}
         </div>`;
       })() : ''}
-      ${isOverdriveActive(this.overdriveState) ? `<div class=\"overdrive-vignette\" style=\"opacity:${0.3 + 0.2 * Math.sin(this.elapsedEncounterSeconds * 8)}\"></div>` : ''}
+      <!-- Overdrive vignette handled by atmosphere CSS layers -->
       ${this.playerBuffs.length > 0 ? `<div class="ability-bar">${this.playerBuffs.map((b) => `<div class="ability-slot active" title="${b.kind === 'power_surge' ? 'Power Surge' : 'Rapid Fire'} — ${b.remaining.toFixed(1)}s"><span class="ability-icon">${b.kind === 'power_surge' ? '⚡' : '🔥'}</span><span class="ability-fill active-fill" style="width:${(b.remaining / b.duration) * 100}%"></span></div>`).join('')}</div>` : ''}
       ${this.activeMutators.length > 0 ? `<div class="ability-bar" style="justify-content:center;gap:6px">${this.activeMutators.map((m) => `<div class="ability-slot active" title="${m.def.displayName}: ${m.def.description}" style="border-color:#c084fc"><span class="ability-icon">${m.def.icon}</span></div>`).join('')}</div>` : ''}
       ${hasMutations(this.mutagenState) ? `

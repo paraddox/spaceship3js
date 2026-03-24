@@ -57,6 +57,7 @@ export class App {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.rendererHost.id = 'game-container';
     this.rendererHost.className = 'renderer-host';
     this.rendererHost.appendChild(this.renderer.domElement);
     this.uiRoot.className = 'ui-root';
