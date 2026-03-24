@@ -30,6 +30,8 @@ export interface RunStats {
   dashCount: number;
   abilityActivations: number;
   blueprintsSalvaged: number;
+  nearMissTotal: number;
+  nearMissBestStreak: number;
 }
 
 export interface RunGrade {
@@ -67,6 +69,8 @@ export const DEFAULT_RUN_STATS: RunStats = {
   dashCount: 0,
   abilityActivations: 0,
   blueprintsSalvaged: 0,
+  nearMissTotal: 0,
+  nearMissBestStreak: 0,
 };
 
 /**
@@ -81,8 +85,9 @@ export function computeRunGrade(stats: RunStats): RunGrade {
     ? Math.min(100, (stats.damageDealt / Math.max(1, stats.damageTaken)) * 5)
     : 0;
   const survivalScore = Math.min(100, stats.timeSeconds / 3);
+  const styleScore = Math.min(100, (stats.nearMissTotal * 1.5) + (stats.nearMissBestStreak * 4));
 
-  const total = (waveScore + killScore + comboScore + efficiencyScore + survivalScore) / 5;
+  const total = (waveScore + killScore + comboScore + efficiencyScore + survivalScore + styleScore) / 6;
 
   if (total >= 80) return RUN_GRADES[0]; // S
   if (total >= 60) return RUN_GRADES[1]; // A
@@ -168,6 +173,9 @@ export function getHighlights(stats: RunStats): string[] {
   if (stats.timeSeconds >= 300) highlights.push(`${formatTime(stats.timeSeconds)} survived`);
   if (stats.mutatorsChosen.length >= 3) highlights.push('Full mutator build');
   if (stats.overdriveActivations >= 3) highlights.push(`Overdrive activated ${stats.overdriveActivations}x`);
+  if (stats.nearMissTotal >= 50) highlights.push(`💫 ${stats.nearMissTotal} near-misses — Bullet Dancer`);
+  else if (stats.nearMissTotal >= 20) highlights.push(`${stats.nearMissTotal} near-miss dodges`);
+  if (stats.nearMissBestStreak >= 5) highlights.push(`👻 ${stats.nearMissBestStreak}x near-miss streak`);
 
   return highlights.slice(0, 3);
 }

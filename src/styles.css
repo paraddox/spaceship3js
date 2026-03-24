@@ -560,3 +560,15 @@ ul {
   from { box-shadow: 0 0 8px rgba(168, 85, 247, 0.3); border-color: rgba(168, 85, 247, 0.5); }
   to   { box-shadow: 0 0 16px rgba(168, 85, 247, 0.7); border-color: rgba(168, 85, 247, 1); }
 }
+
+/* Near-miss bullet-time vignette */
+canvas.near-miss-active {
+  animation: near-miss-vignette 0.5s ease-in-out;
+}
+
+@keyframes near-miss-vignette {
+  0%   { filter: brightness(1) saturate(1); }
+  20%  { filter: brightness(1.15) saturate(0.6) contrast(1.1); }
+  50%  { filter: brightness(1.1) saturate(0.5) contrast(1.15); }
+  100% { filter: brightness(1) saturate(1) contrast(1); }
+}

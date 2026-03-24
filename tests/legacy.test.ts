@@ -41,6 +41,9 @@ function makeSnapshot(overrides: Partial<RunSnapshot> = {}): RunSnapshot {
     overdriveActivations: 0,
     dashCount: 1,
     abilityActivations: 0,
+    blueprintsSalvaged: 0,
+    nearMissTotal: 0,
+    nearMissBestStreak: 0,
     grade: 'C',
     ...overrides,
   };

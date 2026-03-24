@@ -133,6 +133,9 @@ describe('spawnDeathExplosion / tickDeathExplosions', () => {
 
 describe('disposeCombatFeedback', () => {
   it('removes all active feedback from scene and resets state', () => {
+    const mockCtx = { clearRect: () => {}, fillText: () => {}, measureText: () => ({ width: 10 }), font: '', fillStyle: '', strokeStyle: '', lineWidth: 0, strokeRect: () => {} };
+    const canvas = { width: 0, height: 0, getContext: () => mockCtx, toDataURL: () => '' } as unknown as HTMLCanvasElement;
+    vi.stubGlobal('document', { createElement: () => canvas });
     const state: CombatFeedbackState = { floatingTexts: [], muzzleFlashes: [], deathExplosions: [] };
     spawnDamageNumber(state, new THREE.Vector3(0, 0, 0), 10);
     spawnMuzzleFlash(state, scene, new THREE.Vector3(0, 0, 0));

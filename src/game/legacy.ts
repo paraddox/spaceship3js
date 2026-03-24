@@ -74,6 +74,8 @@ export interface RunSnapshot {
   dashCount: number;
   abilityActivations: number;
   blueprintsSalvaged: number;
+  nearMissTotal: number;
+  nearMissBestStreak: number;
   grade: string;
 }
 
@@ -378,6 +380,28 @@ export const MILESTONES: MilestoneDef[] = [
     hint: 'Salvage 5 unique enemy blueprints',
     check: (_s, legacy) => legacy.totalSalvaged >= 5,
   },
+
+  // ── Style Milestones ──
+  {
+    id: 'bullet_dancer',
+    displayName: 'Bullet Dancer',
+    icon: '💫',
+    description: 'Dodge 50 projectiles in a single run',
+    category: 'combat',
+    unlocks: 'lucky_draw',
+    hint: 'Trigger 50 near-misses in one run',
+    check: (s) => s.nearMissTotal >= 50,
+  },
+  {
+    id: 'ghost',
+    displayName: 'Ghost',
+    icon: '👻',
+    description: 'Achieve a near-miss streak of 5+',
+    category: 'survival',
+    unlocks: 'dash_master',
+    hint: 'Chain 5 near-misses within 2 seconds',
+    check: (s) => s.nearMissBestStreak >= 5,
+  },
 ];
 
 // ── Default State ────────────────────────────────────────────
@@ -420,6 +444,13 @@ export function computeLegacyXp(snapshot: RunSnapshot): number {
   if (snapshot.bestCombo >= 5) xp += 5;
   if (snapshot.bestCombo >= 10) xp += 10;
   if (snapshot.bestCombo >= 20) xp += 15;
+
+  // Near-miss XP: reward skilled dodging
+  xp += Math.min(Math.floor(snapshot.nearMissTotal * 1.5), 30);
+
+  // Near-miss streak XP
+  if (snapshot.nearMissBestStreak >= 3) xp += 5;
+  if (snapshot.nearMissBestStreak >= 5) xp += 10;
 
   // Grade bonus
   switch (snapshot.grade) {

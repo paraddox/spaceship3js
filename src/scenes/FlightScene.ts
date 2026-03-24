@@ -112,6 +112,16 @@ import {
   type ActiveBuff,
 } from '../game/pickups';
 import {
+  createNearMissState,
+  checkNearMiss,
+  tickNearMiss,
+  getNearMissComboBonus,
+  getEnemyTimeScale,
+  NEAR_MISS_RADIUS,
+  HIT_RADIUS,
+  type NearMissState,
+} from '../game/near-miss';
+import {
   generateUpgradeOptions,
   upgradeCost,
   applyUpgrade,
@@ -445,6 +455,7 @@ interface Projectile {
   ownerId?: string;
   ownerIsWingman?: boolean;
   nebulaBoosted?: boolean;
+  nearMissChecked?: boolean;
   active: boolean;
 }
 
@@ -573,6 +584,7 @@ export class FlightScene {
   private comboState: ComboState = createComboState();
   private combatFeedback: CombatFeedbackState = { floatingTexts: [], muzzleFlashes: [], deathExplosions: [] };
   private overdriveState: OverdriveState = createOverdriveState();
+  private nearMissState: NearMissState = createNearMissState();
   private crewOrdersState: CrewOrdersState = createCrewOrdersState();
   private crewOrderAnnouncement = '';
   private crewOrderAnnouncementTimer = 0;
@@ -698,7 +710,10 @@ export class FlightScene {
     this.updateWaveDelay(dt);
     this.updateOverdrive(dt);
     this.updateCrewOrders(dt);
-    const enemyDt = dt * getOverdriveTimeScale(this.overdriveState);
+    this.updateNearMiss(dt);
+    const overdriveScale = getOverdriveTimeScale(this.overdriveState);
+    const nearMissResult = tickNearMiss(this.nearMissState, 0);
+    const enemyDt = dt * getEnemyTimeScale(overdriveScale, nearMissResult.timeScale);
     this.updatePlayer(dt);
     this.updateProtectedAllies(enemyDt);
     this.updateEnemies(enemyDt);
@@ -1905,6 +1920,27 @@ export class FlightScene {
           });
           this.deactivateProjectile(projectile);
           break;
+        }
+      }
+      if (hit) continue;
+
+      // Near-miss detection: enemy projectiles that graze the player
+      // without hitting trigger bullet-time.
+      if (this.isEndlessMode && projectile.team === 'enemy' && !projectile.nearMissChecked) {
+        const distToPlayer = projectile.mesh.position.distanceTo(this.player.position);
+        if (distToPlayer <= NEAR_MISS_RADIUS && distToPlayer > this.player.radius * 0.45) {
+          const result = checkNearMiss(this.nearMissState, distToPlayer);
+          if (result.triggered) {
+            this.nearMissState = result.newState;
+            // Grant combo timer bonus
+            this.comboState.timer += getNearMissComboBonus(this.nearMissState.currentStreak);
+            // Visual feedback: gold "NEAR MISS" floating text
+            spawnDamageNumber(this.combatFeedback,
+              this.player.position.clone().add(new THREE.Vector3(0, 1.5, 0)),
+              this.nearMissState.currentStreak, true);
+          }
+          // Mark so we don't re-check this projectile (even if cooldown blocked)
+          projectile.nearMissChecked = true;
         }
       }
     }
@@ -3324,6 +3360,7 @@ export class FlightScene {
         ${this.isEndlessMode ? `<div><span>Credits</span><strong style=\"color:#fbbf24\">💰 ${this.endlessCredits}</strong></div>` : ''}
         ${this.isEndlessMode && this.wingmanState.config ? `<div><span>Wingman</span><strong style="color:${this.wingmanState.active ? '#60a5fa' : '#64748b'}">${this.wingmanState.active ? `${this.wingmanState.config.name} ${(this.wingmanState.hpFraction * 100).toFixed(0)}% · ${this.wingmanState.totalKills} K · ${Math.round(this.wingmanState.totalDamageDealt)} dmg` : `Respawn ${this.wingmanState.respawnTimer.toFixed(0)}s · ${this.wingmanState.totalKills} K · ${Math.round(this.wingmanState.totalDamageDealt)} dmg`}</strong></div>` : ''}
         ${this.isEndlessMode && this.nemesisState.active ? `<div><span>Nemesis</span><strong style="color:#f472b6">${getNemesisStatus(this.nemesisState.active)}</strong></div>` : ''}
+        ${this.isEndlessMode && this.nearMissState.active ? `<div><span style="color:#fbbf24">💫 NEAR MISS</span><strong style="color:#fbbf24">${this.nearMissState.currentStreak}x streak</strong></div>` : ''}
         ${this.isEndlessMode && this.purchasedUpgrades.length > 0 ? `<div><span>Upgrades</span><strong>${this.purchasedUpgrades.length}</strong></div>` : ''}
       </div>
       <div class="ability-bar">
@@ -3425,6 +3462,8 @@ export class FlightScene {
           timeSeconds: this.elapsedEncounterSeconds,
           hpRemaining: Math.max(0, this.player.hp),
           maxHp: this.player.stats.maxHp,
+          nearMissTotal: this.nearMissState.total,
+          nearMissBestStreak: this.nearMissState.bestStreak,
         };
         const grade = computeRunGrade(s);
         const highlights = getHighlights(s);
@@ -3468,6 +3507,8 @@ export class FlightScene {
               <span style="color:#94a3b8">Elites Slain</span><span style="text-align:right;font-weight:600">${s.eliteKills}</span>
               <span style="color:#94a3b8">Dashes</span><span style="text-align:right;font-weight:600">${s.dashCount}</span>
               <span style="color:#94a3b8">Overdrives</span><span style="text-align:right;font-weight:600">${s.overdriveActivations}</span>
+              <span style="color:#94a3b8">Near Misses</span><span style="text-align:right;font-weight:600;color:#fbbf24">💫 ${s.nearMissTotal}</span>
+              <span style="color:#94a3b8">Best Streak</span><span style="text-align:right;font-weight:600;color:#c084fc">${s.nearMissBestStreak}x</span>
               <span style="color:#94a3b8">Upgrades</span><span style="text-align:right;font-weight:600">${s.upgradesPurchased.length}</span>
             </div>
           </div>
@@ -4090,6 +4131,21 @@ export class FlightScene {
         * getComboTimerDecayMult(this.crisisState.activeEffects)
         * getTacticianComboDecayMultiplier(this.crewOrdersState, this.player.blueprint.crew),
     );
+  }
+
+  private updateNearMiss(dt: number): void {
+    if (!this.isEndlessMode) return;
+    const wasActive = this.nearMissState.active;
+    const { state } = tickNearMiss(this.nearMissState, dt);
+    this.nearMissState = state;
+
+    // Toggle CSS class for vignette/tint effect
+    const canvas = this.renderer.domElement;
+    if (this.nearMissState.active && !wasActive) {
+      canvas.classList.add('near-miss-active');
+    } else if (!this.nearMissState.active && wasActive) {
+      canvas.classList.remove('near-miss-active');
+    }
   }
 
   private updateOverdrive(dt: number): void {
@@ -5250,6 +5306,8 @@ export class FlightScene {
       dashCount: this.runStats.dashCount,
       abilityActivations: this.runStats.abilityActivations,
       blueprintsSalvaged: this.runStats.blueprintsSalvaged,
+      nearMissTotal: this.nearMissState.total,
+      nearMissBestStreak: this.nearMissState.bestStreak,
       grade: grade.letter,
     };
   }
