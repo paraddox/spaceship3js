@@ -607,3 +607,38 @@ canvas.near-miss-active {
   50%  { filter: brightness(1.1) saturate(0.5) contrast(1.15); }
   100% { filter: brightness(1) saturate(1) contrast(1); }
 }
+
+/* ── Reactive Atmosphere Vignettes ── */
+/* Driven by CSS custom properties set per-frame on the canvas element */
+
+#game-container::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: 40;
+  background:
+    /* Danger red vignette — fades in below 30% HP */
+    radial-gradient(
+      ellipse at center,
+      transparent 40%,
+      rgba(220, 38, 38, var(--atmo-danger, 0)) 80%,
+      rgba(185, 28, 28, calc(var(--atmo-danger, 0) * 1.3)) 100%
+    ),
+    /* Combo gold shimmer — visible at 5+ kills */
+    radial-gradient(
+      ellipse at center,
+      transparent 50%,
+      rgba(251, 191, 36, var(--atmo-combo, 0)) 75%,
+      rgba(245, 158, 11, calc(var(--atmo-combo, 0) * 0.6)) 100%
+    ),
+    /* Overdrive purple tint */
+    radial-gradient(
+      ellipse at center,
+      transparent 30%,
+      rgba(168, 85, 247, var(--atmo-overdrive, 0)) 65%,
+      rgba(126, 34, 206, calc(var(--atmo-overdrive, 0) * 1.2)) 100%
+    );
+  mix-blend-mode: screen;
+  opacity: 0.9;
+}

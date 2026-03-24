@@ -261,6 +261,10 @@ import {
   MAX_ACTIVE_BONUSES,
 } from '../game/legacy';
 import {
+  createAtmosphere,
+  tickAtmosphere,
+} from '../game/atmosphere';
+import {
   createBossAI,
   updateBossAI,
   isBossVulnerable,
@@ -487,6 +491,12 @@ export class FlightScene {
   private readonly pointer = new THREE.Vector2();
   private readonly groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private readonly arenaGroup = new THREE.Group();
+  private arenaRing!: THREE.LineLoop;
+  private arenaStars!: THREE.Points;
+  private arenaGrid!: THREE.Group;
+  private arenaGridMaterial!: THREE.MeshBasicMaterial;
+  private atmosphere = createAtmosphere();
+  private nebulaEmitAccum = 0;
   private readonly projectileGroup = new THREE.Group();
   private readonly effectGroup = new THREE.Group();
   private readonly healthBarGroup = new THREE.Group();
@@ -734,6 +744,7 @@ export class FlightScene {
     this.updateCombo(dt);
     this.updateBoss(dt);
     this.updateMusic(dt);
+    this.updateAtmosphere(dt);
     this.updateWingman(dt);
     this.updateContracts(dt);
     // Tick crisis event timers
@@ -926,6 +937,36 @@ export class FlightScene {
     plane.rotation.x = -Math.PI / 2;
     this.arenaGroup.add(plane);
 
+    // ── Circuit grid lines (reactive to combat intensity) ──
+    this.arenaGrid = new THREE.Group();
+    this.arenaGridMaterial = new THREE.MeshBasicMaterial({
+      color: '#1e3a5f',
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+    });
+    // Concentric rings at radii 3, 6, 9, 12, 15
+    for (const radius of [3, 6, 9, 12, 15]) {
+      const segments = Math.max(24, Math.floor(radius * 4));
+      const ringGeo = new THREE.RingGeometry(radius - 0.02, radius + 0.02, segments);
+      const ringMesh = new THREE.Mesh(ringGeo, this.arenaGridMaterial);
+      ringMesh.rotation.x = -Math.PI / 2;
+      ringMesh.position.y = 0.01;
+      this.arenaGrid.add(ringMesh);
+    }
+    // Radial lines: 12 spokes from center
+    for (let i = 0; i < 12; i++) {
+      const angle = (i / 12) * Math.PI * 2;
+      const geo = new THREE.PlaneGeometry(ARENA_RADIUS * 0.9, 0.04);
+      const spoke = new THREE.Mesh(geo, this.arenaGridMaterial);
+      spoke.rotation.x = -Math.PI / 2;
+      spoke.rotation.z = -angle;
+      spoke.position.y = 0.01;
+      this.arenaGrid.add(spoke);
+    }
+    this.arenaGroup.add(this.arenaGrid);
+
+    // ── Arena ring ──
     const ring = new THREE.LineLoop(
       new THREE.BufferGeometry().setFromPoints(
         Array.from({ length: 64 }, (_, i) => {
@@ -935,6 +976,7 @@ export class FlightScene {
       ),
       new THREE.LineBasicMaterial({ color: '#1f3a57' }),
     );
+    this.arenaRing = ring;
     this.arenaGroup.add(ring);
 
     if (this.encounterObjective.type === 'protect_ally') {
@@ -960,7 +1002,7 @@ export class FlightScene {
       this.arenaGroup.add(extractionPad, extractionRing);
     }
 
-    const stars = new THREE.Points(
+    this.arenaStars = new THREE.Points(
       new THREE.BufferGeometry().setAttribute(
         'position',
         new THREE.Float32BufferAttribute(
@@ -972,9 +1014,9 @@ export class FlightScene {
           3,
         ),
       ),
-      new THREE.PointsMaterial({ color: '#dbeafe', size: 0.05 }),
+      new THREE.PointsMaterial({ color: '#dbeafe', size: 0.05, transparent: true, opacity: 0.7 }),
     );
-    this.arenaGroup.add(stars);
+    this.arenaGroup.add(this.arenaStars);
   }
 
   private buildProjectiles(): void {
@@ -4380,6 +4422,78 @@ export class FlightScene {
     if (beatTriggered) {
       triggerBeat(this.musicState);
     }
+  }
+
+  private updateAtmosphere(dt: number): void {
+    if (!this.isEndlessMode) return;
+
+    const hpFraction = this.player.hp / Math.max(1, this.player.stats.maxHp);
+    const nearMissSlowMo = this.nearMissState.active;
+
+    this.atmosphere = tickAtmosphere(this.atmosphere, {
+      intensity: this.musicState.intensity,
+      hpFraction,
+      comboKills: this.comboState.kills,
+      overdriveActive: isOverdriveActive(this.overdriveState),
+      bossAlive: this.bossShip !== null && this.bossShip.alive,
+      nearMissActive: nearMissSlowMo,
+      elapsed: this.elapsedEncounterSeconds,
+      waveActive: this.currentWave > 0 && this.ships.some(s => s.alive && s.team === 'enemy'),
+    }, dt);
+
+    const a = this.atmosphere;
+
+    // ── Grid brightness ──
+    this.arenaGridMaterial.opacity = a.gridBrightness;
+    // Shift grid color with intensity
+    const gridColor = new THREE.Color(a.ringColor);
+    this.arenaGridMaterial.color = gridColor;
+
+    // ── Arena ring pulse ──
+    const ringMat = this.arenaRing.material as THREE.LineBasicMaterial;
+    ringMat.color = new THREE.Color(a.ringColor);
+    ringMat.transparent = true;
+    ringMat.opacity = 0.3 + a.ringPulse * 0.7;
+
+    // ── Stars ──
+    const starMat = this.arenaStars.material as THREE.PointsMaterial;
+    starMat.opacity = a.starBrightness;
+    starMat.size = 0.03 + a.starTwinkle * 0.06;
+
+    // ── Fog ──
+    if (!this.scene.fog) {
+      this.scene.fog = new THREE.FogExp2(0x081421, 0.008);
+    }
+    (this.scene.fog as THREE.FogExp2).density = 0.006 + (1 - a.fogFar / 75) * 0.01;
+
+    // ── Nebula ambient particles ──
+    this.nebulaEmitAccum += dt * a.nebulaRate;
+    while (this.nebulaEmitAccum >= 1) {
+      this.nebulaEmitAccum -= 1;
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 4 + Math.random() * (ARENA_RADIUS - 6);
+      this.particles.emit({
+        position: new THREE.Vector3(
+          Math.cos(angle) * dist,
+          0.1 + Math.random() * 1.5,
+          Math.sin(angle) * dist,
+        ),
+        count: 1,
+        speed: [a.nebulaDrift * 0.3, a.nebulaDrift * 0.6],
+        life: [2, 5],
+        startScale: [0.08, 0.2],
+        color: a.nebulaColor,
+        startOpacity: 0.15 + Math.random() * 0.1,
+        endOpacity: 0,
+        drag: 0.95,
+      });
+    }
+
+    // ── CSS vignette layers ──
+    const root = document.documentElement;
+    root.style.setProperty('--atmo-danger', String(a.dangerVignette));
+    root.style.setProperty('--atmo-combo', String(a.comboShimmer));
+    root.style.setProperty('--atmo-overdrive', String(a.overdriveVignette));
   }
 
   /** Map of ship ID → affix mods for tracking regeneration/explode. */
