@@ -77,6 +77,8 @@ export interface RunSnapshot {
   nearMissTotal: number;
   nearMissBestStreak: number;
   grade: string;
+  sigilId?: string;
+  sigilTier?: number;
 }
 
 export interface CompletedMilestone {

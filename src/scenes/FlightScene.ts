@@ -407,6 +407,26 @@ import {
   getUpgradeStatMult,
   shouldClearMutations,
 } from '../game/critical-events';
+import {
+  type SigilState,
+  type SigilDef,
+  createSigilState,
+  activateSigil,
+  advanceSigilTier,
+  clearTierUpPending,
+  resetWaveState,
+  registerSigilKill,
+  tickSigilTimers,
+  consumeDefensiveSave,
+  getSigilEffects,
+  generateSigilOffers,
+  isFreePurchaseWave,
+  consumeFreePurchase,
+  getShopCostMult,
+  SIGIL_CATALOG,
+  getSigilDef,
+  type SigilId,
+} from '../game/sigils';
 
 const REPAIR_HP_FRACTION = 0.75;
 
@@ -483,6 +503,8 @@ interface Projectile {
   ownerIsWingman?: boolean;
   nebulaBoosted?: boolean;
   nearMissChecked?: boolean;
+  /** Remaining pierce count for Warp Lance projectiles. */
+  pierceRemaining?: number;
   active: boolean;
 }
 
@@ -669,6 +691,17 @@ export class FlightScene {
   private riftWellMesh: THREE.Mesh | null = null;
   private empFlashTimer = 0;
 
+  // Pilot Sigil system (run identity)
+  private sigilState: SigilState = createSigilState();
+  private sigilOffers: SigilDef[] = [];
+  private sigilSelectionOpen = false;
+  private sigilEffects = getSigilEffects(createSigilState());
+  private sigilShotCounter = 0;
+  private sigilFocusTarget: string | null = null;
+  private sigilFocusHits = 0;
+  private sigilAnnouncement = '';
+  private sigilAnnouncementTimer = 0;
+
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
     this.keys.add(event.code);
@@ -772,6 +805,8 @@ export class FlightScene {
     this.updatePickups(dt);
     this.updatePlayerBuffs(dt);
     this.updateCombo(dt);
+    // Sigil: tick timers (streak countdown)
+    this.sigilState = tickSigilTimers(this.sigilState, dt);
     this.updateBoss(dt);
     this.updateMusic(dt);
     this.updateAtmosphere(dt);
@@ -852,6 +887,10 @@ export class FlightScene {
     if (this.contractAnnouncementTimer > 0) {
       this.contractAnnouncementTimer -= dt;
       if (this.contractAnnouncementTimer <= 0) this.contractAnnouncement = '';
+    }
+    if (this.sigilAnnouncementTimer > 0) {
+      this.sigilAnnouncementTimer -= dt;
+      if (this.sigilAnnouncementTimer <= 0) this.sigilAnnouncement = '';
     }
     this.updateAbilities(dt);
     this.updateHealthBars();
@@ -1165,6 +1204,16 @@ export class FlightScene {
       this.wingmanShip = null;
       this.wingmanFireTimer = 0;
     }
+    // Reset sigil state for new run
+    this.sigilState = createSigilState();
+    this.sigilOffers = [];
+    this.sigilSelectionOpen = false;
+    this.sigilEffects = getSigilEffects(createSigilState());
+    this.sigilShotCounter = 0;
+    this.sigilFocusTarget = null;
+    this.sigilFocusHits = 0;
+    this.sigilAnnouncement = '';
+    this.sigilAnnouncementTimer = 0;
     this.waveAnnouncement = `${this.currentWave > 0 ? `Wave ${this.currentWave}` : 'Wave 1'} incoming...`;
     this.player = this.createShip('player-1', 'player', playerBlueprint, new THREE.Vector3(0, 0, 8), Math.PI, 0, 0);
     this.ships.push(this.player);
@@ -1198,7 +1247,15 @@ export class FlightScene {
         this.ships.push(ally);
       }
     }
-    this.spawnWave(1);
+    // Sigil selection: in endless mode, offer sigils before first wave
+    if (this.isEndlessMode) {
+      this.sigilOffers = generateSigilOffers();
+      this.sigilSelectionOpen = true;
+      this.shopOpen = true; // pause the game like the shop does
+      this.waveAnnouncement = 'Choose your Pilot Sigil — this defines your run identity.';
+    } else {
+      this.spawnWave(1);
+    }
   }
 
   private spawnWave(waveNumber: number): void {
@@ -1307,6 +1364,14 @@ export class FlightScene {
       }
       if (combinedAffixes.length > 0) {
         this.applyAffixMods(runtimeShip, combinedAffixes);
+      }
+      // Sigil: apply enemy stat modifiers (Entropy Field trade-off)
+      // These are composited into the affix multiplier fields so tryFire picks them up.
+      if (this.sigilEffects.enemyDamageMult !== 1) {
+        runtimeShip.affixDamageMult = (runtimeShip.affixDamageMult ?? 1) * this.sigilEffects.enemyDamageMult;
+      }
+      if (this.sigilEffects.enemyFireRateMult !== 1) {
+        runtimeShip.affixFireRateMult = (runtimeShip.affixFireRateMult ?? 1) * this.sigilEffects.enemyFireRateMult;
       }
     }
 
@@ -1432,13 +1497,20 @@ export class FlightScene {
     if (this.keys.has('Space') && canDash(this.dashState)) {
       const shipRot = this.player.group.rotation.y;
       const crisisDashMult = getDashCooldownMult(this.crisisState.activeEffects);
-      const effectiveReduction = 1 - (1 - this.effectiveStats.dashCooldownReduction) * crisisDashMult;
+      const effectiveReduction = 1 - (1 - this.effectiveStats.dashCooldownReduction) * crisisDashMult * this.sigilEffects.dashCooldownMult;
       this.dashState = startDash(
         this.dashState, forward.x, forward.z, right.x, right.z,
         shipRot, effectiveReduction,
       );
       if (this.isEndlessMode) this.runStats.dashCount += 1;
       this.particles.emit(ParticleSystem.dashBurst(this.player.position));
+      // Sigil: Void Walker — dash grants shield
+      if (this.sigilEffects.shieldOnDash > 0) {
+        this.player.shield = Math.min(
+          this.player.maxShield + this.sigilEffects.shieldOnDash,
+          this.player.shield + this.sigilEffects.shieldOnDash,
+        );
+      }
       // Crisis: Time Echo — spawn a ghost copy at dash origin that auto-fires
       const ghostDuration = getDashGhostDuration(this.crisisState.activeEffects);
       if (ghostDuration > 0 && !this.crisisDashGhostShip) {
@@ -1508,6 +1580,20 @@ export class FlightScene {
     if (isDashing(this.dashState)) {
       this.player.velocity.x = this.dashState.dashDirX * this.player.stats.thrust * this.dashState.speedMultiplier / 50;
       this.player.velocity.z = this.dashState.dashDirZ * this.player.stats.thrust * this.dashState.speedMultiplier / 50;
+      // Sigil: Void Walker tier 3 — dash damage to nearby enemies
+      if (this.sigilEffects.dashDamageArmorMult > 0) {
+        for (const enemy of this.ships.filter(s => s.team === 'enemy' && s.alive)) {
+          const dist = enemy.position.distanceTo(this.player.position);
+          if (dist < 2) {
+            const dashDmg = this.player.stats.armorRating * this.sigilEffects.dashDamageArmorMult;
+            const hitAngle = Math.atan2(
+              this.player.position.x - enemy.position.x,
+              this.player.position.z - enemy.position.z,
+            );
+            this.applyDamage(enemy, dashDmg, 'kinetic', 0, hitAngle);
+          }
+        }
+      }
     }
 
     this.player.position.addScaledVector(this.player.velocity, dt);
@@ -1780,6 +1866,13 @@ export class FlightScene {
         enemy.heat,
         enemy.stats.heatCapacity,
       ) * (isAfterburning(enemy.abilities) ? 1.8 : 1) * (enemy.affixThrustMult ?? 1) * (bossPhaseMult?.speedMult ?? 1);
+      // Sigil: Graviton tier 2 — slow aura around player
+      const sigilSlowMult = (this.sigilEffects.slowRadius > 0
+        ? (() => {
+            const distToPlayer = enemy.position.distanceTo(this.player.position);
+            return distToPlayer < this.sigilEffects.slowRadius ? (1 - this.sigilEffects.slowAmount) : 1;
+          })()
+        : 1);
 
       // Hazard avoidance steering
       const seekConduit = ctx.ownHpRatio < 0.5 && ctx.ownShieldRatio < 0.3;
@@ -1788,8 +1881,8 @@ export class FlightScene {
       // Aggressive enemies commit harder to forward movement
       const forwardCommit = stance === 'aggressive' ? 0.45 : stance === 'retreating' ? 0.25 : 0.35;
 
-      enemy.velocity.addScaledVector(direction, advance * effectiveThrust * dt * forwardCommit);
-      enemy.velocity.addScaledVector(side, lateralThrust * dt * 0.7);
+      enemy.velocity.addScaledVector(direction, advance * effectiveThrust * dt * forwardCommit * sigilSlowMult);
+      enemy.velocity.addScaledVector(side, lateralThrust * dt * 0.7 * sigilSlowMult);
       enemy.velocity.x += hazardSteer.x * dt;
       enemy.velocity.z += hazardSteer.z * dt;
       enemy.velocity.multiplyScalar(stance === 'retreating' ? 0.988 : 0.982);
@@ -1843,6 +1936,7 @@ export class FlightScene {
         * crisisFireRate
         * getGunnerCadenceMultiplier(this.crewOrdersState, playerCrew)
         * getTacticianCadenceMultiplier(this.crewOrdersState, playerCrew)
+        * this.sigilEffects.fireRateMult
       : (ship.affixFireRateMult ?? 1) * (bossPhaseMult?.fireRateMult ?? 1);
     const effectiveCadence = getEffectiveWeaponCadence(
       Math.max(1 / Math.max(weapon.cooldown, 0.05), 0.25),
@@ -1865,13 +1959,59 @@ export class FlightScene {
         * this.mutagenStats.damageMultiplier
         * crisisMutagenStatMult
         * crisisDamage
+        * this.getEffectiveSigilDamageMult()
       : (ship.affixDamageMult ?? 1) * (bossPhaseMult?.damageMult ?? 1);
     const focusDamageMult = ship.team === 'player'
       ? getGunnerFocusDamageMultiplier(this.crewOrdersState, playerCrew, focusTargetId)
       : 1;
     const wingmanDamageMult = ship.isWingman ? WINGMAN_DAMAGE_MULT : 1;
     const nebulaDashBoost = ship.id === this.player.id && this.dashState.nebulaBoostRemaining > 0 ? 2 : 1;
-    const damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier * wingmanDamageMult * nebulaDashBoost);
+    let damage = Math.max(4, weapon.damage * ship.powerFactor * buffMultiplier * wingmanDamageMult * nebulaDashBoost);
+
+    // Sigil: Entropy Field — crit chance
+    if (ship.id === this.player.id && this.sigilEffects.critChance > 0 && Math.random() < this.sigilEffects.critChance) {
+      damage *= 2;
+      spawnDamageNumber(this.combatFeedback, ship.position.clone().add(new THREE.Vector3(0, 1, 0)), damage, true);
+    }
+
+    // Sigil: Warp Lance — focus damage (consecutive hits on same target)
+    if (ship.id === this.player.id && this.sigilEffects.focusDamagePctPerHit > 0) {
+      // The target is implicit from the direction — use the nearest enemy in that direction
+      const aimTarget = this.findNearestEnemy(ship);
+      if (aimTarget) {
+        if (this.sigilFocusTarget !== aimTarget.id) {
+          this.sigilFocusTarget = aimTarget.id;
+          this.sigilFocusHits = 1;
+        } else {
+          this.sigilFocusHits++;
+        }
+        const focusBonus = Math.min(this.sigilEffects.focusDamageMaxPct, this.sigilFocusHits * this.sigilEffects.focusDamagePctPerHit);
+        damage *= (1 + focusBonus / 100);
+      }
+    }
+
+    // Sigil: Warp Lance — warp strike (every Nth shot)
+    let isWarpStrike = false;
+    if (ship.id === this.player.id && this.sigilEffects.warpStrikeInterval > 0) {
+      this.sigilShotCounter++;
+      if (this.sigilShotCounter % this.sigilEffects.warpStrikeInterval === 0) {
+        damage *= this.sigilEffects.warpStrikeDamageMult;
+        isWarpStrike = true;
+        // Teleport to nearest enemy
+        const warpTarget = this.findNearestEnemy(ship);
+        if (warpTarget) {
+          this.player.position.copy(warpTarget.position).add(
+            normalizedDirection.clone().multiplyScalar(-3),
+          );
+          this.syncShipTransform(this.player);
+          for (const config of ParticleSystem.deathExplosion(this.player.position)) {
+            this.particles.emit(config);
+          }
+        }
+      }
+    } else if (ship.id === this.player.id) {
+      this.sigilShotCounter++;
+    }
 
     if (weapon.archetype === 'beam') {
       // Muzzle flash for beam weapons
@@ -1908,10 +2048,16 @@ export class FlightScene {
     projectile.focusDamageMult = focusTargetId ? focusDamageMult : undefined;
     projectile.ownerId = ship.id;
     projectile.ownerIsWingman = !!ship.isWingman;
+    // Sigil: pierce count (Warp Lance)
+    if (ship.id === this.player.id && this.sigilEffects.pierceCount > 0) {
+      projectile.pierceRemaining = this.sigilEffects.pierceCount;
+    }
     const crisisEnemyProjMult = getEnemyProjectileSpeedMult(this.crisisState.activeEffects);
+    const sigilProjSpeedMult = ship.team === 'player' ? this.sigilEffects.projectileSpeedMult : 1;
     projectile.velocity.copy(spreadDirection.multiplyScalar(Math.max(
       (weapon.projectileSpeed + (ship.team === 'player' ? this.effectiveStats.projectileSpeedBonus : 0))
-      * (ship.team === 'enemy' ? crisisEnemyProjMult : 1), 8)));
+      * (ship.team === 'enemy' ? crisisEnemyProjMult : 1)
+      * sigilProjSpeedMult, 8)));
     projectile.mesh.visible = true;
     projectile.mesh.position.copy(computeProjectileSpawnPosition(ship.position, spreadDirection, ship.radius));
     projectile.mesh.scale.setScalar(weapon.archetype === 'missile' ? 1.5 : weapon.archetype === 'laser' ? 0.9 : 1.1);
@@ -2008,10 +2154,28 @@ export class FlightScene {
             ownerId: projectile.ownerId,
             isWingman: projectile.ownerIsWingman,
           });
+          // Sigil: Warp Lance pierce — don't deactivate if pierce remaining
+          if (projectile.pierceRemaining !== undefined && projectile.pierceRemaining > 0) {
+            projectile.pierceRemaining--;
+            hit = true; // mark as hit to skip drone checks
+            continue;
+          }
+          // Sigil: Storm Front chain lightning on hit
+          if (projectile.team === 'player' && this.sigilEffects.chainLightningInterval > 0 && this.sigilShotCounter % this.sigilEffects.chainLightningInterval === 0) {
+            const nearbyEnemy = this.ships.find(s => s.team === 'enemy' && s.alive && s.id !== ship.id && s.position.distanceTo(ship.position) < 8);
+            if (nearbyEnemy) {
+              const chainDmg = impactDamage * this.sigilEffects.chainLightningDamagePct / 100;
+              const chainAngle = Math.atan2(ship.position.x - nearbyEnemy.position.x, ship.position.z - nearbyEnemy.position.z);
+              this.applyDamage(nearbyEnemy, chainDmg, 'energy', 0, chainAngle, { ownerId: projectile.ownerId });
+              this.spawnBeamVisual(ship.position, nearbyEnemy.position, 'player');
+            }
+          }
           this.deactivateProjectile(projectile);
+          hit = true;
           break;
         }
       }
+
       if (hit) continue;
 
       // Near-miss detection: enemy projectiles that graze the player
@@ -2248,7 +2412,23 @@ export class FlightScene {
         }
       }
 
-      const destroyed = damageModules(ship.moduleStates, result.hullDamage, hitAngle, 0.6);
+      // Sigil: Ironclad tier 3 — defensive save (survive lethal hit at 1 HP)
+      if (isPlayerShip && result.hullDamage > 0 && ship.hp - result.hullDamage <= 0) {
+        const { state: sigilNewState, saved } = consumeDefensiveSave(this.sigilState);
+        this.sigilState = sigilNewState;
+        if (saved) {
+          ship.hp = 1;
+          result.hullDamage = 0;
+          this.sigilAnnouncement = '🛡️ Ironclad — Last Stand activated!';
+          this.sigilAnnouncementTimer = 3;
+          this.screenShake = createScreenShake(0.5, 0.3);
+          this.particles.emit(ParticleSystem.shieldAbsorb(ship.position, '#64748b'));
+        }
+      }
+
+      // Sigil: module destruction reduction (Ironclad tier 2)
+      const sigilModDmg = isPlayerShip ? this.sigilEffects.moduleDestructionMult : 1;
+      const destroyed = damageModules(ship.moduleStates, result.hullDamage * sigilModDmg, hitAngle, 0.6);
 
       // Recalculate effective stats from surviving modules
       const survivingIds = new Set(ship.moduleStates.filter((m) => !m.destroyed).map((m) => m.instanceId));
@@ -2260,6 +2440,7 @@ export class FlightScene {
       this.reapplyUpgradeBonuses(ship);
       this.reapplyLegacyOnRebuild(ship);
       this.reapplyMutagenOnRebuild(ship);
+      this.reapplySigilOnRebuild(ship);
       ship.powerFactor = computePowerFactor(ship.stats.powerOutput, ship.stats.powerDemand);
       ship.maxShield = ship.stats.shieldStrength;
       ship.shield = Math.min(ship.shield, ship.maxShield);
@@ -2354,6 +2535,43 @@ export class FlightScene {
       // Track kills in endless mode
       if (this.isEndlessMode && ship.team === 'enemy') {
         this.endlessTotalKills += 1;
+        // Sigil: kill tracking and effects
+        if (this.sigilState.activeId) {
+          this.sigilState = registerSigilKill(this.sigilState, 0.016);
+          const fx = this.sigilEffects;
+          // Blood Oath: heal on kill
+          if (fx.healOnKillPct > 0 && this.player.alive) {
+            const healPct = fx.healOnKillPct + Math.min(this.sigilState.killStreak, fx.healStreakCap === 999 ? 0 : fx.healStreakCap) * fx.healOnKillStreakBonusPct;
+            this.player.hp = Math.min(this.player.stats.maxHp, this.player.hp + this.player.stats.maxHp * healPct / 100);
+          }
+          // Entropy Field tier 3: kill pickup chance
+          if (fx.killPickupChance > 0 && Math.random() < fx.killPickupChance) {
+            const kinds: PickupKind[] = ['repair_kit', 'shield_cell', 'power_surge', 'rapid_fire'];
+            const kind = kinds[Math.floor(Math.random() * kinds.length)];
+            this.spawnPickup(kind, ship.position.x, ship.position.z);
+          }
+          // Graviton tier 3: explosion on kill near other enemies
+          if (fx.explosionDamagePct > 0) {
+            const killedMaxHp = ship.stats.maxHp;
+            for (const enemy of this.ships.filter(s => s.team === 'enemy' && s.alive && s.id !== ship.id)) {
+              const dist = enemy.position.distanceTo(ship.position);
+              if (dist < fx.explosionRadius) {
+                const expDmg = killedMaxHp * fx.explosionDamagePct / 100;
+                const expAngle = Math.atan2(ship.position.x - enemy.position.x, ship.position.z - enemy.position.z);
+                this.applyDamage(enemy, expDmg, 'explosive', 0, expAngle);
+              }
+            }
+            this.particles.emit(ParticleSystem.explosionBurst(ship.position, '#06b6d4', 8));
+          }
+          // Storm Front tier 3: Tempest — reduce ability cooldowns on streak
+          if (fx.tempestCdReduction > 0 && this.sigilState.killStreak >= fx.tempestStreakMin) {
+            for (const ability of this.player.abilities) {
+              if (ability.cooldownRemaining > 0) {
+                ability.cooldownRemaining = Math.max(0, ability.cooldownRemaining - fx.tempestCdReduction);
+              }
+            }
+          }
+        }
         if (source?.isWingman) {
           this.wingmanState = recordWingmanKill(this.wingmanState);
         }
@@ -2666,13 +2884,31 @@ export class FlightScene {
         // Grant credits for each wave cleared, multiplied by combo
         const comboMult = getComboCreditMultiplier(this.comboState.kills);
         const creditBoostMult = 1 + getCreditPercentBoost(this.legacyState) / 100;
-        const waveCredits = Math.floor(endlessWaveCredits(this.currentWave - 1) * comboMult * creditBoostMult) + this.endlessWaveEliteBonus;
+        const sigilCreditMult = this.sigilEffects.creditMult;
+        const waveCredits = Math.floor(endlessWaveCredits(this.currentWave - 1) * comboMult * creditBoostMult * sigilCreditMult) + this.endlessWaveEliteBonus;
         this.endlessWaveEliteBonus = 0;
         this.endlessCredits += waveCredits;
         this.runStats.creditsEarned += waveCredits;
         this.onReward(this.encounterId, { credits: waveCredits, score: this.endlessScore, victory: true });
         // Reset combo score bank after applying (combo streak itself persists across waves)
         this.comboState = { ...this.comboState, totalComboScore: 0 };
+
+        // Sigil: check for tier advancement
+        if (this.sigilState.activeId) {
+          this.sigilState = advanceSigilTier(this.sigilState, this.currentWave);
+          if (this.sigilState.tierUpPending) {
+            const sigilDef = getSigilDef(this.sigilState.activeId!);
+            const tierDef = sigilDef?.tiers.find(t => t.tier === this.sigilState.currentTier);
+            if (tierDef) {
+              this.sigilAnnouncement = `${sigilDef?.icon} ${tierDef.name} — ${tierDef.description}`;
+              this.sigilAnnouncementTimer = 3.5;
+            }
+            this.sigilState = clearTierUpPending(this.sigilState);
+            this.sigilEffects = getSigilEffects(this.sigilState);
+            this.rebuildPlayerWithUpgrades();
+          }
+          this.sigilState = resetWaveState(this.sigilState);
+        }
 
         // Check for crisis event before opening shop
         if (shouldTriggerCrisis(this.currentWave, this.crisisState)) {
@@ -3219,6 +3455,48 @@ export class FlightScene {
 
     // When shop is open, replace HUD with upgrade selection UI
     if (this.shopOpen && hud) {
+      // Sigil selection takes priority on first open
+      if (this.sigilSelectionOpen) {
+        const sigilCards = this.sigilOffers.map((offer) => {
+          const t1 = offer.tiers[0];
+          return `<div class="upgrade-card" style="border-color:${offer.color};background:rgba(${parseInt(offer.color.slice(1,3),16)},${parseInt(offer.color.slice(3,5),16)},${parseInt(offer.color.slice(5,7),16)},0.1);cursor:pointer" data-sigil="${offer.id}">
+            <div style="font-size:2em">${offer.icon}</div>
+            <strong style="color:${offer.color}">${offer.displayName}</strong>
+            <p style="margin:4px 0;color:${offer.color};font-style:italic;font-size:0.9em">${offer.tagline}</p>
+            <p style="margin:4px 0;font-size:0.85em">${t1.name}: ${t1.description}</p>
+            <p style="color:#94a3b8;font-size:0.78em;margin-top:4px">Trade-off: ${offer.tradeOff}</p>
+            <p style="color:#64748b;font-size:0.72em;font-style:italic">${t1.flavor}</p>
+            <button class="primary" style="font-size:0.9em;background:${offer.color};border-color:${offer.color};margin-top:8px">
+              Choose ${offer.displayName}
+            </button>
+          </div>`;
+        }).join('');
+        hud.innerHTML = `
+          <div style="text-align:center;margin-bottom:12px">
+            <strong style="font-size:1.2em;color:#e2e8f0">Choose your Pilot Sigil</strong>
+            <p style="color:#94a3b8;font-size:0.9em">This defines your run identity. Choose wisely — it cannot be changed.</p>
+          </div>
+          <div class="upgrade-grid">${sigilCards}</div>
+        `;
+        hud.querySelectorAll('[data-sigil]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const sigilId = (btn as HTMLElement).dataset.sigil as SigilId;
+            if (!sigilId) return;
+            this.sigilState = activateSigil(this.sigilState, sigilId);
+            this.sigilSelectionOpen = false;
+            this.sigilOffers = [];
+            this.sigilEffects = getSigilEffects(this.sigilState);
+            this.applySigilTradeOffs();
+            this.shopOpen = false;
+            const def = getSigilDef(sigilId);
+            this.sigilAnnouncement = `${def?.icon} ${def?.displayName} — ${def?.tagline}`;
+            this.sigilAnnouncementTimer = 3;
+            this.spawnWave(1);
+          });
+        });
+        this.renderer.render(this.scene, this.camera);
+        return;
+      }
       // Crisis event takes priority over normal shop
       if (isCrisisPending(this.crisisState) && this.crisisState.pendingEvent) {
         const event = this.crisisState.pendingEvent;
@@ -3490,6 +3768,7 @@ export class FlightScene {
       ${this.nemesisAnnouncement ? `<div style="color:#f472b6;font-size:0.96em;text-align:center;text-shadow:0 0 8px rgba(244,114,182,0.55)">${this.nemesisAnnouncement}</div>` : ''}
       ${this.crewOrderAnnouncement ? `<div style="color:#93c5fd;font-size:0.92em;text-align:center;text-shadow:0 0 8px rgba(147,197,253,0.55)">${this.crewOrderAnnouncement}</div>` : ''}
       ${this.contractAnnouncement ? `<div style="color:#fbbf24;font-size:0.92em;text-align:center;text-shadow:0 0 8px rgba(251,191,36,0.55)">${this.contractAnnouncement}</div>` : ''}
+      ${this.sigilAnnouncement ? `<div style="color:${this.getSigilColor()};font-size:0.95em;text-align:center;font-weight:600;text-shadow:0 0 10px ${this.getSigilColor()}">${this.sigilAnnouncement}</div>` : ''}
       ${this.nemesisShip && this.nemesisShip.alive && this.nemesisState.active ? (() => {
         const nHp = Math.max(0, this.nemesisShip.hp);
         const nMax = this.nemesisShip.stats.maxHp;
@@ -3525,6 +3804,12 @@ export class FlightScene {
       <!-- Overdrive vignette handled by atmosphere CSS layers -->
       ${this.playerBuffs.length > 0 ? `<div class="ability-bar">${this.playerBuffs.map((b) => `<div class="ability-slot active" title="${b.kind === 'power_surge' ? 'Power Surge' : 'Rapid Fire'} — ${b.remaining.toFixed(1)}s"><span class="ability-icon">${b.kind === 'power_surge' ? '⚡' : '🔥'}</span><span class="ability-fill active-fill" style="width:${(b.remaining / b.duration) * 100}%"></span></div>`).join('')}</div>` : ''}
       ${this.activeMutators.length > 0 ? `<div class="ability-bar" style="justify-content:center;gap:6px">${this.activeMutators.map((m) => `<div class="ability-slot active" title="${m.def.displayName}: ${m.def.description}" style="border-color:#c084fc"><span class="ability-icon">${m.def.icon}</span></div>`).join('')}</div>` : ''}
+      ${this.sigilState.activeId ? (() => {
+        const def = getSigilDef(this.sigilState.activeId);
+        if (!def) return '';
+        const tierLabel = ['I', 'II', 'III'][this.sigilState.currentTier - 1] ?? '';
+        return `<div class="ability-bar" style="justify-content:center;gap:6px;border-color:${def.color}"><span style="color:${def.color};font-size:0.7em;font-weight:600">SIGIL</span><div class="ability-slot active" title="${def.displayName} Tier ${tierLabel}: ${def.tagline}" style="border-color:${def.color}"><span class="ability-icon">${def.icon}</span></div><span style="color:#e2e8f0;font-size:0.75em">${def.displayName}</span><span style="color:${def.color};font-size:0.7em">T${tierLabel}</span>${this.sigilState.killStreak > 1 ? `<span style="color:#f97316;font-size:0.7em">🔥×${this.sigilState.killStreak}</span>` : ''}</div>`;
+      })() : ''}
       ${hasMutations(this.mutagenState) ? `
         <div class="ability-bar" style="border-color:#34d399;margin-top:2px">
           <span style="color:#34d399;font-size:0.7em;font-weight:600">MUTATIONS</span>
@@ -3608,6 +3893,12 @@ export class FlightScene {
           </div>
           ${highlights.length > 0 ? `<div style="text-align:center;margin-bottom:6px">${highlights.map((h) => `<span style="display:inline-block;background:#334155;color:#e2e8f0;padding:2px 8px;border-radius:4px;font-size:0.8em;margin:2px">⭐ ${h}</span>`).join('')}</div>` : ''}
           <div style="font-size:0.8em;margin-bottom:4px"><span style="color:#94a3b8">Traits:</span> ${mutatorTags}</div>
+          ${this.sigilState.activeId ? (() => {
+            const def = getSigilDef(this.sigilState.activeId);
+            if (!def) return '';
+            const tierLabel = ['I', 'II', 'III'][this.sigilState.currentTier - 1] ?? '';
+            return `<div style="font-size:0.8em;margin-bottom:4px"><span style="color:#94a3b8">Sigil:</span> <span style="color:${def.color};font-weight:600">${def.icon} ${def.displayName}</span> <span style="color:#64748b">Tier ${tierLabel}</span></div>`;
+          })() : ''}
           <div style="font-size:0.8em;color:#fb7185;margin-bottom:6px">${cause}</div>
           ${this.runSalvagedEntries.length > 0 ? `<div style="background:#1e1b4b;border-radius:6px;padding:8px;margin-bottom:6px"><div style="font-size:0.8em;color:#c084fc;font-weight:600;margin-bottom:4px">🔧 Blueprints Salvaged (${this.runSalvagedEntries.length})</div>${this.runSalvagedEntries.map((e) => { const rc = RARITY_CONFIG[e.rarity]; return `<div style="display:flex;align-items:center;gap:6px;margin-top:3px"><span style="color:${rc.color};font-weight:600;font-size:0.8em">${rc.label}</span><span style="color:#e2e8f0;font-size:0.8em">${e.name}</span></div>`; }).join('')}</div>` : ''}
           <div style="background:#0f172a;border-left:3px solid #38bdf8;padding:6px 8px;border-radius:0 4px 4px 0;font-size:0.8em;color:#94a3b8;margin-bottom:6px">
@@ -4115,12 +4406,13 @@ export class FlightScene {
   private updatePickups(dt: number): void {
     for (let i = this.pickups.length - 1; i >= 0; i--) {
       const pickup = this.pickups[i];
-      const updated = updatePickup(pickup, dt);
+      const sigilDespawnDt = this.sigilEffects.pickupDespawnMult < 1 ? dt / this.sigilEffects.pickupDespawnMult : dt;
+      const updated = updatePickup(pickup, sigilDespawnDt);
 
       // Magnetic attraction toward player
       if (updated.active && this.player.alive) {
         const attracted = applyPickupAttraction(
-          { ...updated, attractionRange: updated.attractionRange * (1 + this.effectiveStats.pickupRangeBonus) },
+          { ...updated, attractionRange: updated.attractionRange * (1 + this.effectiveStats.pickupRangeBonus) * this.sigilEffects.pickupRangeMult },
           this.player.position.x, this.player.position.z, dt,
         );
         updated.x = attracted.newX;
@@ -4794,7 +5086,13 @@ export class FlightScene {
 
   private purchaseUpgrade(upgrade: UpgradeDef): void {
     const crisisCostReduction = getUpgradeCostReduction(this.crisisState.activeEffects);
-    const cost = Math.floor(upgradeCost(upgrade, this.shopWaveCleared) * (1 - crisisCostReduction));
+    const sigilCostMult = getShopCostMult(this.sigilState);
+    let cost = Math.floor(upgradeCost(upgrade, this.shopWaveCleared) * (1 - crisisCostReduction) * sigilCostMult);
+    // Sigil: War Economy tier 3 — free first purchase each wave
+    if (isFreePurchaseWave(this.sigilState) && cost > 0) {
+      cost = 0;
+      this.sigilState = consumeFreePurchase(this.sigilState);
+    }
     if (this.endlessCredits < cost) return;
 
     this.endlessCredits -= cost;
@@ -4866,6 +5164,9 @@ export class FlightScene {
 
     // Apply mutagen multipliers (order matches module-breakage path: legacy before mutagen)
     this.reapplyMutagenOnRebuild(this.player);
+
+    // Re-apply sigil modifiers
+    this.reapplySigilOnRebuild(this.player);
 
     // Recalculate power factor
     this.player.powerFactor = computePowerFactor(this.player.stats.powerOutput, this.player.stats.powerDemand);
@@ -5475,6 +5776,8 @@ export class FlightScene {
       nearMissTotal: this.nearMissState.total,
       nearMissBestStreak: this.nearMissState.bestStreak,
       grade: grade.letter,
+      sigilId: this.sigilState.activeId ?? undefined,
+      sigilTier: this.sigilState.activeId ? this.sigilState.currentTier : undefined,
     };
   }
 
@@ -5636,6 +5939,51 @@ export class FlightScene {
         proj.velocity.z += force.fz * dt * 1.5;
       }
     }
+  }
+
+  // ── Sigil Methods ─────────────────────────────────────────
+
+  /** Dynamic damage multiplier accounting for Blood Oath tier 3 streak bonus. */
+  private getSigilColor(): string {
+    if (!this.sigilState.activeId) return '#e2e8f0';
+    const def = getSigilDef(this.sigilState.activeId);
+    return def?.color ?? '#e2e8f0';
+  }
+
+  private getEffectiveSigilDamageMult(): number {
+    if (!this.sigilState.activeId) return 1;
+    const fx = this.sigilEffects;
+    let mult = fx.damageMult;
+    if (fx.damageAtStreakPct > 0 && this.sigilState.killStreak >= fx.healStreakCap) {
+      mult *= (1 + fx.damageAtStreakPct / 100);
+    }
+    return mult;
+  }
+
+  /** Apply sigil trade-off stat modifiers to the player at run start. */
+  private applySigilTradeOffs(): void {
+    const fx = this.sigilEffects;
+    if (fx.hpMult !== 1) {
+      this.player.stats.maxHp = Math.round(this.player.stats.maxHp * fx.hpMult);
+      this.player.hp = Math.round(this.player.hp * fx.hpMult);
+      this.player.maxShield = Math.round(this.player.maxShield * fx.hpMult);
+      this.player.shield = Math.round(this.player.shield * fx.hpMult);
+    }
+    if (fx.armorBonus !== 0) {
+      this.player.stats.armorRating += fx.armorBonus;
+    }
+    if (fx.thrustMult !== 1) {
+      this.player.stats.thrust *= fx.thrustMult;
+    }
+  }
+
+  /** Re-apply sigil stat modifiers after module rebuilds. */
+  private reapplySigilOnRebuild(ship: RuntimeShip): void {
+    if (ship.id !== this.player.id) return;
+    const fx = this.sigilEffects;
+    if (fx.hpMult !== 1) ship.stats.maxHp = Math.round(ship.stats.maxHp * fx.hpMult);
+    if (fx.armorBonus !== 0) ship.stats.armorRating += fx.armorBonus;
+    if (fx.thrustMult !== 1) ship.stats.thrust *= fx.thrustMult;
   }
 
   private renderRiftHud(): string {
