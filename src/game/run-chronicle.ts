@@ -77,14 +77,17 @@ const PILOT_TITLE_KEY = 'spachip3js.pilotTitle';
 
 // ── Run Persistence ──────────────────────────────────────────
 
-export function saveRunRecord(record: RunRecord): void {
+export function persistRunRecords(records: RunRecord[]): void {
   try {
-    const existing = loadAllRecords();
-    existing.unshift(record);
-    // Cap at MAX_STORED_RUNS — keep newest, drop oldest
-    const trimmed = existing.slice(0, MAX_STORED_RUNS);
+    const trimmed = records.slice(0, MAX_STORED_RUNS);
     window.localStorage.setItem(CHRONICLE_STORAGE_KEY, JSON.stringify(trimmed));
   } catch { /* storage full or unavailable — silently skip */ }
+}
+
+export function saveRunRecord(record: RunRecord): void {
+  const existing = loadAllRecords();
+  existing.unshift(record);
+  persistRunRecords(existing);
 }
 
 export function loadAllRecords(): RunRecord[] {

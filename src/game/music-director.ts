@@ -1,3 +1,6 @@
+import type { AudioSettings } from './audio-settings';
+import { getEffectiveMusicVolume } from './audio-settings';
+
 // ── Battle Music Director ─────────────────────────────────────────
 //
 // Real-time procedural music that adapts to gameplay intensity.
@@ -228,6 +231,7 @@ function seeded(seed: number): number {
 
 let audioCtx: AudioContext | null = null;
 let masterGainNode: GainNode | null = null;
+let musicVolumeScale = 1;
 
 /**
  * Initialize the music audio context. Call once on user interaction.
@@ -250,6 +254,17 @@ export function initMusicAudio(): boolean {
  */
 export function resumeMusicAudio(): void {
   audioCtx?.resume();
+}
+
+export function applyMusicSettings(settings: AudioSettings): void {
+  musicVolumeScale = getEffectiveMusicVolume(settings);
+  if (masterGainNode && audioCtx) {
+    try {
+      masterGainNode.gain.setValueAtTime(musicVolumeScale <= 0 ? 0 : masterGainNode.gain.value, audioCtx.currentTime);
+    } catch {
+      // audio context may already be closed
+    }
+  }
 }
 
 /**
@@ -682,7 +697,7 @@ export function updateMusicDirector(
       s.masterVolume = Math.max(s.targetMasterVolume, s.masterVolume - volRate * dt * 0.5);
     }
     try {
-      masterGainNode.gain.setValueAtTime(s.masterVolume, audioCtx!.currentTime);
+      masterGainNode.gain.setValueAtTime(s.masterVolume * musicVolumeScale, audioCtx!.currentTime);
     } catch { /* context may be closed */ }
   }
 

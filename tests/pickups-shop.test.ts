@@ -14,6 +14,7 @@ import {
   defaultLiveUpgradeStats,
   generateUpgradeOptions,
   upgradeCost,
+  getUpgradeOfferCost,
   applyUpgrade,
   applyAllUpgrades,
   UPGRADE_CATALOG,
@@ -305,6 +306,35 @@ describe('upgrade-shop', () => {
         // At waveMin, scaling factor is 1
         expect(cost).toBe(u.cost);
       }
+    });
+  });
+
+  describe('getUpgradeOfferCost', () => {
+    it('applies crisis and sigil discounts before the free purchase check', () => {
+      expect(getUpgradeOfferCost({
+        baseCost: 100,
+        crisisCostReduction: 0.2,
+        sigilCostMult: 0.9,
+        hasFreePurchase: false,
+      })).toEqual({ cost: 72, isFree: false, consumesFreePurchase: false });
+    });
+
+    it('marks discounted offers as free when a free purchase is available', () => {
+      expect(getUpgradeOfferCost({
+        baseCost: 100,
+        crisisCostReduction: 0.1,
+        sigilCostMult: 1,
+        hasFreePurchase: true,
+      })).toEqual({ cost: 0, isFree: true, consumesFreePurchase: true });
+    });
+
+    it('does not consume a free purchase when discounts already reduce cost to zero', () => {
+      expect(getUpgradeOfferCost({
+        baseCost: 10,
+        crisisCostReduction: 1,
+        sigilCostMult: 1,
+        hasFreePurchase: true,
+      })).toEqual({ cost: 0, isFree: true, consumesFreePurchase: false });
     });
   });
 

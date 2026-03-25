@@ -5,8 +5,8 @@ import {
 } from '../src/game/encounters';
 
 describe('encounter presets', () => {
-  it('exposes multiple scenario presets', () => {
-    expect(ENCOUNTER_PRESETS.length).toBeGreaterThanOrEqual(3);
+  it('exposes a broader scenario catalog', () => {
+    expect(ENCOUNTER_PRESETS.length).toBeGreaterThanOrEqual(6);
   });
 
   it('includes a default gauntlet scenario with three waves', () => {
@@ -31,6 +31,15 @@ describe('encounter presets', () => {
       ),
     );
     expect(allEnemyModuleIds).toContain('core:light_drone_bay');
+  });
+
+  it('includes hazard-heavy nebula scenarios beyond the starter set', () => {
+    const crossfire = getEncounterPreset('crossfire');
+    const holdout = getEncounterPreset('holdout');
+    expect(crossfire?.waves).toHaveLength(2);
+    expect(crossfire?.waves.flatMap((wave) => wave.hazards).filter((hazard) => hazard.kind === 'damage_nebula').length).toBeGreaterThanOrEqual(3);
+    expect(holdout?.objective.type).toBe('survive');
+    expect(holdout?.objective.durationSeconds).toBeGreaterThanOrEqual(60);
   });
 
   it('includes explicit objective metadata for presets', () => {

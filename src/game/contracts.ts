@@ -1,6 +1,6 @@
 import type { MutagenId } from './mutagen';
 
-export type ContractKind = 'priority_target' | 'blink_blitz' | 'chain_harvest';
+export type ContractKind = 'priority_target' | 'blink_blitz' | 'chain_harvest' | 'cull_order' | 'clean_exit';
 export type ContractStatus = 'accepted' | 'active' | 'completed' | 'failed';
 
 export interface ContractReward {
@@ -21,12 +21,15 @@ export interface ContractOffer {
   reward: ContractReward;
   timeLimitSeconds?: number;
   comboGoal?: number;
+  killGoal?: number;
 }
 
 export interface ActiveContract extends ContractOffer {
   status: ContractStatus;
   elapsedSeconds: number;
   comboPeak: number;
+  killsRegistered: number;
+  hullDamageTaken: number;
   targetShipId?: string;
   targetLabel?: string;
   successMessage?: string;
@@ -41,7 +44,7 @@ export interface ContractTargetCandidate {
   isBoss: boolean;
 }
 
-const CONTRACT_ROTATION: ContractKind[] = ['priority_target', 'blink_blitz', 'chain_harvest'];
+const CONTRACT_ROTATION: ContractKind[] = ['priority_target', 'blink_blitz', 'chain_harvest', 'cull_order', 'clean_exit'];
 const ESSENCE_ROTATION: MutagenId[] = [
   'aggressive',
   'tough',
@@ -66,6 +69,8 @@ export function acceptContract(offer: ContractOffer): ActiveContract {
     status: 'accepted',
     elapsedSeconds: 0,
     comboPeak: 0,
+    killsRegistered: 0,
+    hullDamageTaken: 0,
   };
 }
 
@@ -132,6 +137,33 @@ export function registerPriorityTargetKill(contract: ActiveContract, shipId: str
   };
 }
 
+export function registerContractKill(contract: ActiveContract): ActiveContract {
+  if (contract.status !== 'active' || contract.kind !== 'cull_order') return contract;
+  const killsRegistered = contract.killsRegistered + 1;
+  if (contract.killGoal && killsRegistered >= contract.killGoal) {
+    return {
+      ...contract,
+      killsRegistered,
+      status: 'completed',
+      successMessage: `Contract complete — kill order reached ${contract.killGoal} confirmed targets.`,
+    };
+  }
+  return {
+    ...contract,
+    killsRegistered,
+  };
+}
+
+export function registerContractHullDamage(contract: ActiveContract, hullDamage: number): ActiveContract {
+  if (contract.status !== 'active' || contract.kind !== 'clean_exit' || hullDamage <= 0) return contract;
+  return {
+    ...contract,
+    hullDamageTaken: contract.hullDamageTaken + hullDamage,
+    status: 'failed',
+    failureMessage: 'Contract failed — hull breach detected.',
+  };
+}
+
 export function resolveContractOnWaveEnd(contract: ActiveContract, waveCleared: boolean): ActiveContract {
   if (contract.status === 'completed' || contract.status === 'failed') return contract;
 
@@ -171,6 +203,34 @@ export function resolveContractOnWaveEnd(contract: ActiveContract, waveCleared: 
         };
   }
 
+  if (contract.kind === 'cull_order') {
+    return contract.killGoal && contract.killsRegistered >= contract.killGoal
+      ? {
+          ...contract,
+          status: 'completed',
+          successMessage: `Contract complete — kill order reached ${contract.killGoal} confirmed targets.`,
+        }
+      : {
+          ...contract,
+          status: 'failed',
+          failureMessage: 'Contract failed — not enough confirmed kills.',
+        };
+  }
+
+  if (contract.kind === 'clean_exit') {
+    return contract.hullDamageTaken <= 0
+      ? {
+          ...contract,
+          status: 'completed',
+          successMessage: 'Contract complete — no hull breaches recorded.',
+        }
+      : {
+          ...contract,
+          status: 'failed',
+          failureMessage: 'Contract failed — hull breach detected.',
+        };
+  }
+
   return {
     ...contract,
     status: 'failed',
@@ -192,8 +252,17 @@ export function getContractProgressLabel(contract: ActiveContract): string {
     return `${remaining.toFixed(1)}s remaining`;
   }
 
-  const goal = contract.comboGoal ?? 0;
-  return `${Math.min(contract.comboPeak, goal)} / ${goal} combo`;
+  if (contract.kind === 'chain_harvest') {
+    const goal = contract.comboGoal ?? 0;
+    return `${Math.min(contract.comboPeak, goal)} / ${goal} combo`;
+  }
+
+  if (contract.kind === 'cull_order') {
+    const goal = contract.killGoal ?? 0;
+    return `${Math.min(contract.killsRegistered, goal)} / ${goal} kills`;
+  }
+
+  return contract.hullDamageTaken > 0 ? 'Hull breach logged' : 'Hull still pristine';
 }
 
 function pickOfferKinds(waveNumber: number, bossWave: boolean): ContractKind[] {
@@ -202,6 +271,7 @@ function pickOfferKinds(waveNumber: number, bossWave: boolean): ContractKind[] {
   return [
     CONTRACT_ROTATION[start],
     CONTRACT_ROTATION[(start + 1) % CONTRACT_ROTATION.length],
+    CONTRACT_ROTATION[(start + 2) % CONTRACT_ROTATION.length],
   ];
 }
 
@@ -257,6 +327,37 @@ function buildOffer(kind: ContractKind, waveNumber: number, bossWave: boolean): 
         },
         comboGoal: getComboGoal(waveNumber),
       };
+    case 'cull_order':
+      return {
+        kind,
+        waveNumber,
+        displayName: 'Cull Order',
+        description: `Confirm ${getCullGoal(waveNumber)} kills during the next wave.`,
+        flavor: 'The brief is simple: make the wave thinner before it reaches you.',
+        icon: '☠️',
+        color: '#ef4444',
+        reward: {
+          credits: Math.round(20 + waveNumber * 7),
+          score: Math.round(120 + waveNumber * 30),
+          overdriveCharge: 0.18,
+        },
+        killGoal: getCullGoal(waveNumber),
+      };
+    case 'clean_exit':
+      return {
+        kind,
+        waveNumber,
+        displayName: 'Clean Exit',
+        description: 'Clear the next wave without taking hull damage.',
+        flavor: 'The payout is for pilots who can make the battlefield miss entirely.',
+        icon: '🛡️',
+        color: '#14b8a6',
+        reward: {
+          credits: Math.round(24 + waveNumber * 8 + (bossWave ? 12 : 0)),
+          score: Math.round(135 + waveNumber * 32 + (bossWave ? 80 : 0)),
+          overdriveCharge: bossWave ? 0.28 : 0.2,
+        },
+      };
   }
 }
 
@@ -285,4 +386,8 @@ function getBlitzTimeLimit(waveNumber: number, bossWave: boolean): number {
 
 function getComboGoal(waveNumber: number): number {
   return Math.min(6, Math.max(2, 2 + Math.floor(waveNumber / 5)));
+}
+
+function getCullGoal(waveNumber: number): number {
+  return Math.min(8, Math.max(2, 2 + Math.floor(waveNumber / 4)));
 }

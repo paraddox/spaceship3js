@@ -24,6 +24,20 @@ import {
   persistOnboardingState,
   type OnboardingState,
 } from '../game/onboarding';
+import {
+  parseCareerProfile,
+  serializeCareerProfile,
+} from '../game/career-profile';
+import { loadAudioSettings } from '../game/audio-settings';
+import { applySfxSettings } from '../game/audio';
+import { applyMusicSettings } from '../game/music-director';
+import { loadLegacyState, persistLegacyState } from '../game/legacy';
+import { loadSalvageCollection, persistSalvageCollection } from '../game/salvage';
+import { loadWingmanConfig, persistWingmanConfig } from '../game/wingman';
+import { loadMutagenState, persistMutagenState } from '../game/mutagen';
+import { loadLineageLocker, persistLineageLocker } from '../game/lineage';
+import { loadAllRecords, getSelectedTitle, persistRunRecords, setSelectedTitle } from '../game/run-chronicle';
+import { loadNemesisState, persistNemesisState } from '../game/nemesis';
 
 interface ActiveScene {
   update(dt: number): void;
@@ -67,6 +81,9 @@ export class App {
     this.selectedEncounterId = this.loadEncounterId();
     this.hangarEntries = this.loadHangarEntries();
     this.progression = this.loadProgression();
+    const audioSettings = loadAudioSettings();
+    applySfxSettings(audioSettings);
+    applyMusicSettings(audioSettings);
     window.addEventListener('resize', this.handleResize);
     this.handleResize();
     this.showEditor();
@@ -86,7 +103,7 @@ export class App {
 
   private loadEncounterId(): string {
     const saved = window.localStorage.getItem(ENCOUNTER_KEY);
-    if (saved && getEncounterPreset(saved)) return saved;
+    if (saved === 'endless' || (saved && getEncounterPreset(saved))) return saved;
     return ENCOUNTER_PRESETS[0]?.id ?? 'gauntlet';
   }
 
@@ -140,6 +157,54 @@ export class App {
     window.localStorage.setItem(PROGRESSION_KEY, JSON.stringify(this.progression));
   }
 
+  private exportCareerProfile(): string {
+    return serializeCareerProfile({
+      blueprint: this.blueprint,
+      selectedEncounterId: this.selectedEncounterId,
+      hangarEntries: this.hangarEntries,
+      progression: this.progression,
+      onboardingState: this.onboardingState,
+      legacyState: loadLegacyState(),
+      salvageCollection: loadSalvageCollection(),
+      wingmanConfig: loadWingmanConfig(),
+      mutagenState: loadMutagenState(),
+      lineageLocker: loadLineageLocker(),
+      chronicleRecords: loadAllRecords(),
+      selectedTitle: getSelectedTitle(),
+      nemesisState: loadNemesisState(),
+    });
+  }
+
+  private importCareerProfile(raw: string): { ok: boolean; message: string } {
+    const parsed = parseCareerProfile(raw);
+    if (parsed.ok === false) {
+      return { ok: false, message: parsed.error };
+    }
+
+    this.blueprint = cloneBlueprint(parsed.profile.blueprint);
+    this.selectedEncounterId = parsed.profile.selectedEncounterId;
+    this.hangarEntries = parsed.profile.hangarEntries;
+    this.progression = parsed.profile.progression;
+    this.onboardingState = parsed.profile.onboardingState;
+
+    this.persistBlueprint();
+    this.persistEncounterId();
+    this.persistHangarEntries();
+    this.persistProgression();
+    persistOnboardingState(this.onboardingState);
+    persistLegacyState(parsed.profile.legacyState);
+    persistSalvageCollection(parsed.profile.salvageCollection);
+    persistWingmanConfig(parsed.profile.wingmanConfig);
+    persistMutagenState(parsed.profile.mutagenState);
+    persistLineageLocker(parsed.profile.lineageLocker);
+    persistRunRecords(parsed.profile.chronicleRecords);
+    setSelectedTitle(parsed.profile.selectedTitle);
+    persistNemesisState(parsed.profile.nemesisState);
+
+    this.showEditor();
+    return { ok: true, message: 'Career backup imported. Your ship, unlocks, chronicle, and endless progression have been restored.' };
+  }
+
   private showEditor(): void {
     this.activeScene?.dispose();
     this.activeScene = new EditorScene({
@@ -177,6 +242,8 @@ export class App {
         this.persistHangarEntries();
         this.showEditor();
       },
+      onExportCareer: () => this.exportCareerProfile(),
+      onImportCareer: (raw) => this.importCareerProfile(raw),
       onUnlockModule: (moduleId) => {
         this.progression = unlockModule(this.progression, moduleId);
         this.persistProgression();

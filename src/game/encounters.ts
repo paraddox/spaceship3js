@@ -59,6 +59,20 @@ beamEnemy.modules = beamEnemy.modules.map((module, index) =>
   index === beamEnemy.modules.length - 1 ? { ...module, definitionId: 'core:laser_beam_light' } : module,
 );
 
+const carrierEnemy: ShipBlueprint = {
+  name: 'Drone Carrier',
+  crew: { ...DEFAULT_CREW_ALLOCATION, engineer: 2, tactician: 2 },
+  modules: [
+    { instanceId: 'carrier-bridge', definitionId: 'core:bridge_scout', position: { q: 0, r: 0 }, rotation: 0 },
+    { instanceId: 'carrier-reactor', definitionId: 'core:reactor_small', position: { q: 1, r: 0 }, rotation: 0 },
+    { instanceId: 'carrier-hull', definitionId: 'core:hull_2x1', position: { q: -1, r: 0 }, rotation: 0 },
+    { instanceId: 'carrier-engine', definitionId: 'core:thruster_small', position: { q: 2, r: -1 }, rotation: 0 },
+    { instanceId: 'carrier-engine-2', definitionId: 'core:thruster_lateral', position: { q: -2, r: 1 }, rotation: 0 },
+    { instanceId: 'carrier-drone', definitionId: 'core:light_drone_bay', position: { q: 0, r: -1 }, rotation: 0 },
+    { instanceId: 'carrier-weapon', definitionId: 'core:missile_launcher', position: { q: -1, r: -1 }, rotation: 0 },
+  ],
+};
+
 const frigateEnemy: ShipBlueprint = {
   name: 'Frigate Spearhead',
   crew: { ...DEFAULT_CREW_ALLOCATION, gunner: 2, tactician: 2 },
@@ -202,6 +216,68 @@ export const ENCOUNTER_PRESETS: EncounterPreset[] = [
           { kind: 'damage_nebula', x: -3, z: -10, radius: 2.5, damagePerSecond: 12 },
           { kind: 'shield_conduit', x: -6, z: 3, radius: 1.4 },
           { kind: 'shield_conduit', x: 1, z: 6, radius: 1.5 },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'crossfire',
+    displayName: 'Nebula Crossfire',
+    description: 'Fight through carrier pressure and beam lanes while purple gas cuts off the center lane.',
+    objective: { type: 'eliminate_all', label: 'Break the ambush and clear the lane' },
+    waves: [
+      {
+        name: 'Crossing Fire',
+        enemies: [
+          { id: 'crossfire-1', blueprint: beamEnemy, position: new THREE.Vector3(-11, 0, -9), rotation: 0.2, preferredRange: 8, fireJitter: 0.16 },
+          { id: 'crossfire-2', blueprint: missileEnemy, position: new THREE.Vector3(11, 0, -10), rotation: -0.2, preferredRange: 11.5, fireJitter: 0.42 },
+          { id: 'crossfire-3', blueprint: carrierEnemy, position: new THREE.Vector3(0, 0, -13), rotation: 0, preferredRange: 10, fireJitter: 0.28 },
+        ],
+        hazards: [
+          { kind: 'damage_nebula', x: 0, z: -8, radius: 3.2, damagePerSecond: 14 },
+          { kind: 'damage_nebula', x: -8, z: -4, radius: 2.2, damagePerSecond: 10 },
+          { kind: 'shield_conduit', x: 8, z: 4, radius: 1.5 },
+          { kind: 'asteroid', x: 4, z: -4, radius: 1.1 },
+        ],
+      },
+      {
+        name: 'Anchor Break',
+        enemies: [
+          { id: 'crossfire-4', blueprint: frigateEnemy, position: new THREE.Vector3(0, 0, -12), rotation: 0, preferredRange: 9, fireJitter: 0.24 },
+          { id: 'crossfire-5', blueprint: carrierEnemy, position: new THREE.Vector3(-12, 0, -8), rotation: 0.18, preferredRange: 10.5, fireJitter: 0.3 },
+          { id: 'crossfire-6', blueprint: beamEnemy, position: new THREE.Vector3(12, 0, -8), rotation: -0.18, preferredRange: 8.5, fireJitter: 0.14 },
+        ],
+        hazards: [
+          { kind: 'damage_nebula', x: -5, z: -9, radius: 2.8, damagePerSecond: 15 },
+          { kind: 'damage_nebula', x: 6, z: -6, radius: 2.6, damagePerSecond: 13 },
+          { kind: 'shield_conduit', x: 0, z: 6, radius: 1.6 },
+          { kind: 'asteroid', x: -9, z: -3, radius: 1.0 },
+          { kind: 'asteroid', x: 9, z: -2, radius: 1.0 },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'holdout',
+    displayName: 'Nebula Holdout',
+    description: 'Survive a long-form containment breach while carriers and beam ships squeeze the safe pockets dry.',
+    objective: { type: 'survive', label: 'Hold out until the corridor stabilizes', durationSeconds: 60 },
+    waves: [
+      {
+        name: 'Containment Breach',
+        enemies: [
+          { id: 'holdout-1', blueprint: carrierEnemy, position: new THREE.Vector3(-12, 0, -10), rotation: 0.16, preferredRange: 10.5, fireJitter: 0.3 },
+          { id: 'holdout-2', blueprint: beamEnemy, position: new THREE.Vector3(0, 0, -13), rotation: 0, preferredRange: 8, fireJitter: 0.12 },
+          { id: 'holdout-3', blueprint: missileEnemy, position: new THREE.Vector3(12, 0, -10), rotation: -0.16, preferredRange: 11.8, fireJitter: 0.4 },
+          { id: 'holdout-4', blueprint: waveOneEnemy, position: new THREE.Vector3(0, 0, -7), rotation: 0, preferredRange: 7.2, fireJitter: 0.28 },
+        ],
+        hazards: [
+          { kind: 'damage_nebula', x: 0, z: -7, radius: 3.6, damagePerSecond: 15 },
+          { kind: 'damage_nebula', x: -9, z: -2, radius: 2.4, damagePerSecond: 11 },
+          { kind: 'damage_nebula', x: 9, z: -2, radius: 2.4, damagePerSecond: 11 },
+          { kind: 'shield_conduit', x: -4, z: 6, radius: 1.4 },
+          { kind: 'shield_conduit', x: 4, z: 6, radius: 1.4 },
+          { kind: 'asteroid', x: 0, z: 2, radius: 1.2 },
         ],
       },
     ],

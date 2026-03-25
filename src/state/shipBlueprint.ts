@@ -1,6 +1,7 @@
 import type { CrewAllocation, HexCoord, ModuleDefinition, PlacedModule, ShipBlueprint, ShipStats } from '../core/types';
 import { addHex, getNeighbors, hexKey, normalizeRotation, transformFootprint } from '../core/hex';
 import { DEFAULT_CREW_ALLOCATION, clampCrewAllocation } from '../game/crew';
+import { loadLineageLocker } from '../game/lineage';
 import { EXAMPLE_SCOUT_BLUEPRINT, MODULES_BY_ID } from '../data/moduleCatalog';
 
 export interface BlueprintValidation {
@@ -34,12 +35,24 @@ export function createExampleBlueprint(): ShipBlueprint {
   return cloneBlueprint(EXAMPLE_SCOUT_BLUEPRINT);
 }
 
+function ensureLineageModulesRegistered(): void {
+  const locker = loadLineageLocker();
+  for (const module of locker.modules) {
+    MODULES_BY_ID[module.id] = module.definition;
+  }
+}
+
 export function getModuleDefinition(definitionId: string): ModuleDefinition {
   const module = MODULES_BY_ID[definitionId];
-  if (!module) {
+  if (module) {
+    return module;
+  }
+  ensureLineageModulesRegistered();
+  const lineageModule = MODULES_BY_ID[definitionId];
+  if (!lineageModule) {
     throw new Error(`Unknown module definition: ${definitionId}`);
   }
-  return module;
+  return lineageModule;
 }
 
 export function getWorldFootprint(module: PlacedModule): HexCoord[] {

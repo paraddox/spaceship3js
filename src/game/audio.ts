@@ -1,4 +1,8 @@
+import type { AudioSettings } from './audio-settings';
+import { getEffectiveSfxVolume } from './audio-settings';
+
 let ctx: AudioContext | null = null;
+let sfxVolumeScale = 1;
 
 function getCtx(): AudioContext | null {
   if (!ctx) {
@@ -11,14 +15,19 @@ export function resumeAudio(): void {
   getCtx()?.resume();
 }
 
+export function applySfxSettings(settings: AudioSettings): void {
+  sfxVolumeScale = getEffectiveSfxVolume(settings);
+}
+
 function tone(freq: number, dur: number, vol: number, type: OscillatorType = 'square'): void {
   const c = getCtx();
-  if (!c) return;
+  const effectiveVolume = vol * sfxVolumeScale;
+  if (!c || effectiveVolume <= 0.0001) return;
   const o = c.createOscillator();
   const g = c.createGain();
   o.type = type;
   o.frequency.value = freq;
-  g.gain.setValueAtTime(vol, c.currentTime);
+  g.gain.setValueAtTime(effectiveVolume, c.currentTime);
   g.gain.exponentialRampToValueAtTime(0.001, c.currentTime + dur);
   o.connect(g).connect(c.destination);
   o.start();

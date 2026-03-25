@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CREW_ALLOCATION,
+  TOTAL_CREW_BUDGET,
   applyCrewModifiers,
+  canIncreaseCrewRole,
   clampCrewAllocation,
   computeCrewModifiers,
+  getRemainingCrewPoints,
+  getTotalCrew,
 } from '../src/game/crew';
 import type { CrewAllocation, ShipStats } from '../src/core/types';
 
@@ -17,11 +21,18 @@ const BASE_STATS: ShipStats = {
   cooling: 0.4,
   engineCount: 2,
   weaponCount: 2,
+  droneBayCount: 0,
+  droneCapacity: 0,
   thrust: 120,
   damagePerVolley: 40,
   shotsPerSecond: 1.2,
   weaponRange: 500,
   heatPerVolley: 10,
+  shieldStrength: 0,
+  shieldRecharge: 0,
+  armorRating: 0,
+  kineticBypass: 0,
+  energyVulnerability: 0,
 };
 
 describe('crew allocation helpers', () => {
@@ -36,6 +47,23 @@ describe('crew allocation helpers', () => {
       engineer: 0,
       tactician: 1,
     });
+  });
+
+  it('enforces the total crew budget on oversized allocations', () => {
+    expect(clampCrewAllocation({ pilot: 5, gunner: 5, engineer: 5, tactician: 5 })).toEqual({
+      pilot: 2,
+      gunner: 2,
+      engineer: 1,
+      tactician: 1,
+    });
+  });
+
+  it('reports remaining crew points and role availability', () => {
+    const crew = clampCrewAllocation({ pilot: 1, gunner: 2, engineer: 1, tactician: 1 });
+    expect(getTotalCrew(crew)).toBe(5);
+    expect(getRemainingCrewPoints(crew)).toBe(TOTAL_CREW_BUDGET - 5);
+    expect(canIncreaseCrewRole(crew, 'pilot')).toBe(true);
+    expect(canIncreaseCrewRole({ pilot: 2, gunner: 2, engineer: 1, tactician: 1 }, 'pilot')).toBe(false);
   });
 
   it('computes stronger thrust and handling from pilot crew', () => {

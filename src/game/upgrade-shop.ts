@@ -80,6 +80,12 @@ export interface PurchasedUpgrade {
   wavePurchased: number;
 }
 
+export interface UpgradeOfferCost {
+  cost: number;
+  isFree: boolean;
+  consumesFreePurchase: boolean;
+}
+
 // ── Upgrade Catalog ────────────────────────────────────────────
 
 export const UPGRADE_CATALOG: UpgradeDef[] = [
@@ -350,6 +356,25 @@ export function generateUpgradeOptions(
 export function upgradeCost(upgrade: UpgradeDef, waveNumber: number): number {
   const waveScaling = 1 + Math.max(0, waveNumber - upgrade.waveMin) * 0.05;
   return Math.round(upgrade.cost * waveScaling);
+}
+
+export function getUpgradeOfferCost(opts: {
+  baseCost: number;
+  crisisCostReduction?: number;
+  sigilCostMult?: number;
+  hasFreePurchase?: boolean;
+}): UpgradeOfferCost {
+  const discountedCost = Math.max(0, Math.floor(
+    opts.baseCost
+      * (1 - (opts.crisisCostReduction ?? 0))
+      * (opts.sigilCostMult ?? 1),
+  ));
+  const consumesFreePurchase = !!opts.hasFreePurchase && discountedCost > 0;
+  return {
+    cost: consumesFreePurchase ? 0 : discountedCost,
+    isFree: consumesFreePurchase || discountedCost === 0,
+    consumesFreePurchase,
+  };
 }
 
 /**

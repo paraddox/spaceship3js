@@ -20,9 +20,19 @@ import { createEncounterReward, type EncounterReward } from '../game/progression
 import { evaluateObjective, type EncounterObjective } from '../game/objectives';
 import { computeProjectileSpawnPosition } from '../game/projectiles';
 import { buildEncounterDebrief } from '../game/debrief';
+import {
+  getAudioPercentLabel,
+  loadAudioSettings,
+  persistAudioSettings,
+  stepAudioVolume,
+  toggleAudioMuted,
+  type AudioChannel,
+  type AudioSettings,
+} from '../game/audio-settings';
+import { normalizeVirtualStick, readTouchControlEnvironment, shouldEnableTouchControls } from '../game/touch-controls';
 import { advanceProtectedAlly, chooseEnemyPriorityTarget, computeEscortProgress } from '../game/escort-ai';
 import { advanceEffect, createBeamEffect, createExplosionEffect, createImpactEffect, type CombatEffectState } from '../game/effects';
-import { playShoot, playLaser, playHit, playExplosion, playMissile, playBeam, resumeAudio, playComboTier, playOverdriveActivate, playOverdriveDeactivate } from '../game/audio';
+import { playShoot, playLaser, playHit, playExplosion, playMissile, playBeam, resumeAudio, playComboTier, playOverdriveActivate, playOverdriveDeactivate, applySfxSettings } from '../game/audio';
 import {
   computeFlankSeed,
   computeTacticalDecision,
@@ -147,6 +157,7 @@ import {
 import {
   generateUpgradeOptions,
   upgradeCost,
+  getUpgradeOfferCost,
   applyUpgrade,
   applyAllUpgrades,
   defaultLiveUpgradeStats,
@@ -356,6 +367,7 @@ import {
   initMusicAudio,
   resetMusicDirector,
   destroyMusicAudio,
+  applyMusicSettings,
   type MusicDirectorState,
 } from '../game/music-director';
 import {
@@ -370,6 +382,7 @@ import {
   getMutationDef,
   getMutationStacks,
   hasMutations,
+  canAbsorbNew,
   hasDeathExplosion,
   getDeathExplosionDamage,
   MAX_ESSENCE_SLOTS,
@@ -382,6 +395,8 @@ import {
   generateContractOffers,
   getContractProgressLabel,
   isTerminalContract,
+  registerContractHullDamage,
+  registerContractKill,
   registerPriorityTargetKill,
   resolveContractOnWaveEnd,
   tickContract,
@@ -567,6 +582,11 @@ export class FlightScene {
   private player!: RuntimeShip;
   private fireHeld = false;
   private mouseWorld = new THREE.Vector3(0, 0, -10);
+  private readonly touchControlsEnabled = shouldEnableTouchControls(readTouchControlEnvironment());
+  private audioSettings: AudioSettings = loadAudioSettings();
+  private mobileMoveInput = { x: 0, y: 0 };
+  private mobileAimInput = { x: 0, y: 0, magnitude: 0 };
+  private mobileFireHeld = false;
   private currentWave = 1;
   private encounterOutcome: 'continue' | 'victory' | 'defeat' = 'continue';
   private waveDelay = 0;
@@ -616,6 +636,7 @@ export class FlightScene {
   private shopOpen = false;
   private shopOptions: UpgradeDef[] = [];
   private shopWaveCleared = 0;
+  private shopTargetWave = 1;
   private contractOffers: ContractOffer[] = [];
   private activeContract: ActiveContract | null = null;
   private contractAnnouncement = '';
@@ -660,6 +681,7 @@ export class FlightScene {
   // Legacy Codex (persistent cross-run progression)
   private legacyState: LegacyState = { ...DEFAULT_LEGACY_STATE };
   private legacyFinalized = false;
+  private chronicleSaved = false;
   private legacyNewMilestones: typeof MILESTONES = [];
 
   // Blueprint Scavenging (salvage system)
@@ -671,12 +693,14 @@ export class FlightScene {
   private salvageAnnouncement = '';
   private salvageAnnouncementTimer = 0;
   private runSalvagedEntries: SalvagedBlueprint[] = [];
+  private runCorruptedEntries: CorruptedModule[] = [];
 
   // Persistent rival / nemesis system
   private nemesisState: NemesisState = loadNemesisState();
   private nemesisShip: RuntimeShip | null = null;
   private nemesisAnnouncement = '';
   private nemesisAnnouncementTimer = 0;
+  private nemesisKillsThisRun = 0;
 
   // Wingman system
   private wingmanState: WingmanState = createWingmanState();
@@ -704,6 +728,7 @@ export class FlightScene {
   private riftRingMesh: THREE.Mesh | null = null;
   private riftWellMesh: THREE.Mesh | null = null;
   private empFlashTimer = 0;
+  private riftEventsSurvived = 0;
 
   // Pilot Sigil system (run identity)
   private sigilState: SigilState = createSigilState();
@@ -738,6 +763,9 @@ export class FlightScene {
     this.onBack = onBack;
     this.encounterId = encounterId;
     this.isEndlessMode = encounterId === 'endless';
+    this.audioSettings = loadAudioSettings();
+    applySfxSettings(this.audioSettings);
+    applyMusicSettings(this.audioSettings);
 
     if (this.isEndlessMode) {
       // Endless mode: waves are generated procedurally
@@ -789,6 +817,7 @@ export class FlightScene {
 
     // If shop is open, only render — don't update game state
     if (this.shopOpen) {
+      this.clearMobileInputs();
       this.refreshHud();
       this.renderer.render(this.scene, this.camera);
       return;
@@ -970,6 +999,258 @@ export class FlightScene {
     canvas.addEventListener('pointerup', this.onPointerUp);
   }
 
+  private clearMobileInputs(): void {
+    this.mobileMoveInput = { x: 0, y: 0 };
+    this.mobileAimInput = { x: 0, y: 0, magnitude: 0 };
+    this.mobileFireHeld = false;
+    const moveThumb = this.uiRoot.querySelector<HTMLElement>('#mobile-move-thumb');
+    if (moveThumb) {
+      moveThumb.style.left = '50%';
+      moveThumb.style.top = '50%';
+    }
+    const aimThumb = this.uiRoot.querySelector<HTMLElement>('#mobile-aim-thumb');
+    if (aimThumb) {
+      aimThumb.style.left = '50%';
+      aimThumb.style.top = '50%';
+    }
+    this.uiRoot.querySelector<HTMLElement>('#mobile-aim-zone')?.classList.remove('active');
+  }
+
+  private updateMouseWorldFromClientPoint(clientX: number, clientY: number): void {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.raycaster.ray.intersectPlane(this.groundPlane, this.mouseWorld);
+  }
+
+  private updateMobileMoveInput(clientX: number, clientY: number): void {
+    const zone = this.uiRoot.querySelector<HTMLElement>('#mobile-move-zone');
+    const thumb = this.uiRoot.querySelector<HTMLElement>('#mobile-move-thumb');
+    if (!zone || !thumb) return;
+    const rect = zone.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const radius = Math.min(rect.width, rect.height) * 0.28;
+    const state = normalizeVirtualStick(clientX - centerX, clientY - centerY, radius);
+    this.mobileMoveInput = { x: state.x, y: -state.y };
+    thumb.style.left = `calc(50% + ${state.thumbX}px)`;
+    thumb.style.top = `calc(50% + ${state.thumbY}px)`;
+  }
+
+  private syncMobileAimTarget(): void {
+    if (this.mobileAimInput.magnitude <= 0.01) return;
+    const aimDistance = 14;
+    this.mouseWorld.set(
+      this.player.position.x + this.mobileAimInput.x * aimDistance,
+      0,
+      this.player.position.z - this.mobileAimInput.y * aimDistance,
+    );
+  }
+
+  private updateMobileAimInput(clientX: number, clientY: number): void {
+    const zone = this.uiRoot.querySelector<HTMLElement>('#mobile-aim-zone');
+    const thumb = this.uiRoot.querySelector<HTMLElement>('#mobile-aim-thumb');
+    if (!zone || !thumb) return;
+    const rect = zone.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const radius = Math.min(rect.width, rect.height) * 0.32;
+    const state = normalizeVirtualStick(clientX - centerX, clientY - centerY, radius, 0.12);
+    this.mobileAimInput = { x: state.x, y: -state.y, magnitude: state.magnitude };
+    thumb.style.left = `calc(50% + ${state.thumbX}px)`;
+    thumb.style.top = `calc(50% + ${state.thumbY}px)`;
+    this.syncMobileAimTarget();
+  }
+
+  private renderMobileControls(): string {
+    if (!this.touchControlsEnabled) return '';
+    return `
+      <div class="overlay mobile-controls" id="mobile-controls">
+        <div class="mobile-stick-zone" id="mobile-move-zone">
+          <div class="mobile-stick-base">
+            <div class="mobile-stick-thumb" id="mobile-move-thumb"></div>
+          </div>
+          <div class="mobile-zone-label">Move</div>
+        </div>
+        <div class="mobile-action-stack">
+          <div class="mobile-aim-zone" id="mobile-aim-zone">
+            <div class="mobile-stick-thumb mobile-aim-thumb" id="mobile-aim-thumb"></div>
+            <span>Aim + Fire</span>
+          </div>
+          <div class="mobile-action-group">
+            <div class="mobile-action-group-label">Ship Systems</div>
+            <div class="mobile-button-grid">
+              <button class="mobile-action-button" data-touch-action="dash"><span>Dash</span><small>Ready</small></button>
+              <button class="mobile-action-button" data-touch-action="overdrive"><span>Drive</span><small>Charge</small></button>
+              <button class="mobile-action-button" data-touch-action="ability:shield_boost"><span>Shield</span><small>1</small></button>
+              <button class="mobile-action-button" data-touch-action="ability:afterburner"><span>Burn</span><small>2</small></button>
+              <button class="mobile-action-button" data-touch-action="ability:overcharge"><span>Charge</span><small>3</small></button>
+              <button class="mobile-action-button" data-touch-action="ability:emergency_repair"><span>Repair</span><small>4</small></button>
+            </div>
+          </div>
+          <div class="mobile-action-group">
+            <div class="mobile-action-group-label">Crew Orders</div>
+            <div class="mobile-button-grid mobile-crew-grid">
+              <button class="mobile-action-button mobile-crew-button" data-touch-action="crew:pilot_surge"><span>Pilot</span><small>Z</small></button>
+              <button class="mobile-action-button mobile-crew-button" data-touch-action="crew:gunner_focus"><span>Gunner</span><small>X</small></button>
+              <button class="mobile-action-button mobile-crew-button" data-touch-action="crew:engineer_reroute"><span>Eng.</span><small>C</small></button>
+              <button class="mobile-action-button mobile-crew-button" data-touch-action="crew:tactician_link"><span>Tact.</span><small>B</small></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private attachMobileControls(): void {
+    if (!this.touchControlsEnabled) return;
+    const moveZone = this.uiRoot.querySelector<HTMLElement>('#mobile-move-zone');
+    const aimZone = this.uiRoot.querySelector<HTMLElement>('#mobile-aim-zone');
+    if (moveZone) {
+      let movePointerId: number | null = null;
+      const releaseMove = (event?: PointerEvent) => {
+        if (event && movePointerId !== event.pointerId) return;
+        movePointerId = null;
+        this.mobileMoveInput = { x: 0, y: 0 };
+        const thumb = this.uiRoot.querySelector<HTMLElement>('#mobile-move-thumb');
+        if (thumb) {
+          thumb.style.left = '50%';
+          thumb.style.top = '50%';
+        }
+      };
+      moveZone.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        resumeAudio();
+        movePointerId = event.pointerId;
+        moveZone.setPointerCapture(event.pointerId);
+        this.updateMobileMoveInput(event.clientX, event.clientY);
+      });
+      moveZone.addEventListener('pointermove', (event) => {
+        if (movePointerId !== event.pointerId) return;
+        event.preventDefault();
+        this.updateMobileMoveInput(event.clientX, event.clientY);
+      });
+      moveZone.addEventListener('pointerup', releaseMove);
+      moveZone.addEventListener('pointercancel', releaseMove);
+    }
+    if (aimZone) {
+      let aimPointerId: number | null = null;
+      const releaseAim = (event?: PointerEvent) => {
+        if (event && aimPointerId !== event.pointerId) return;
+        aimPointerId = null;
+        this.mobileAimInput = { x: 0, y: 0, magnitude: 0 };
+        this.mobileFireHeld = false;
+        const thumb = this.uiRoot.querySelector<HTMLElement>('#mobile-aim-thumb');
+        if (thumb) {
+          thumb.style.left = '50%';
+          thumb.style.top = '50%';
+        }
+        aimZone.classList.remove('active');
+      };
+      aimZone.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        resumeAudio();
+        aimPointerId = event.pointerId;
+        aimZone.setPointerCapture(event.pointerId);
+        this.mobileFireHeld = true;
+        aimZone.classList.add('active');
+        this.updateMobileAimInput(event.clientX, event.clientY);
+      });
+      aimZone.addEventListener('pointermove', (event) => {
+        if (aimPointerId !== event.pointerId) return;
+        event.preventDefault();
+        this.updateMobileAimInput(event.clientX, event.clientY);
+      });
+      aimZone.addEventListener('pointerup', releaseAim);
+      aimZone.addEventListener('pointercancel', releaseAim);
+    }
+    this.uiRoot.querySelectorAll<HTMLButtonElement>('[data-touch-action]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const action = button.dataset.touchAction;
+        if (!action) return;
+        resumeAudio();
+        if (action === 'dash') {
+          this.activatePlayerDash();
+          return;
+        }
+        if (action === 'overdrive') {
+          this.activatePlayerOverdrive();
+          return;
+        }
+        if (action.startsWith('ability:')) {
+          this.activatePlayerAbility(action.slice('ability:'.length) as AbilityId);
+          return;
+        }
+        if (action.startsWith('crew:')) {
+          this.activateCrewOrder(action.slice('crew:'.length) as CrewOrderId);
+        }
+      });
+    });
+  }
+
+  private syncMobileButton(action: string, detail: string, disabled: boolean, active = false): void {
+    const button = this.uiRoot.querySelector<HTMLButtonElement>(`[data-touch-action="${action}"]`);
+    if (!button) return;
+    const detailEl = button.querySelector('small');
+    if (detailEl) detailEl.textContent = detail;
+    button.disabled = disabled;
+    button.classList.toggle('active', active);
+    button.classList.toggle('cooldown', !active && !disabled && detail !== 'Ready');
+    button.classList.toggle('unavailable', disabled);
+  }
+
+  private syncMobileControls(): void {
+    if (!this.touchControlsEnabled) return;
+    this.syncMobileButton(
+      'dash',
+      isDashing(this.dashState) ? 'Active' : canDash(this.dashState) ? 'Ready' : `${Math.ceil(this.dashState.cooldownRemaining)}s`,
+      !this.player.alive || this.shopOpen || (!canDash(this.dashState) && !isDashing(this.dashState)),
+      isDashing(this.dashState),
+    );
+
+    const overdriveReady = canActivateOverdrive(this.overdriveState);
+    const overdriveActive = this.overdriveState.phase === 'active';
+    const overdriveDetail = overdriveActive
+      ? `${Math.ceil(this.overdriveState.activeTimer)}s`
+      : this.overdriveState.phase === 'cooldown'
+        ? `${Math.ceil(this.overdriveState.cooldownTimer)}s`
+        : overdriveReady
+          ? 'Ready'
+          : `${Math.floor(this.overdriveState.charge * 100)}%`;
+    this.syncMobileButton('overdrive', overdriveDetail, !this.player.alive || this.shopOpen || (!overdriveReady && !overdriveActive), overdriveActive);
+
+    const syncAbility = (id: AbilityId) => {
+      const ability = this.player.abilities.find((entry) => entry.def.id === id);
+      if (!ability) return;
+      const active = ability.activeRemaining > 0;
+      const ready = ability.cooldownRemaining <= 0;
+      this.syncMobileButton(
+        `ability:${id}`,
+        active ? `${Math.ceil(ability.activeRemaining)}s` : ready ? 'Ready' : `${Math.ceil(ability.cooldownRemaining)}s`,
+        !this.player.alive || this.shopOpen || (!ready && !active),
+        active,
+      );
+    };
+    syncAbility('shield_boost');
+    syncAbility('afterburner');
+    syncAbility('overcharge');
+    syncAbility('emergency_repair');
+
+    for (const def of CREW_ORDER_DEFS) {
+      const activeRemaining = getActiveRemaining(this.crewOrdersState, def.id);
+      const cooldownRemaining = getCooldownRemaining(this.crewOrdersState, def.id);
+      const available = this.player.blueprint.crew[def.role] > 0;
+      const ready = canActivateCrewOrder(this.crewOrdersState, def.id, this.player.blueprint.crew);
+      this.syncMobileButton(
+        `crew:${def.id}`,
+        !available ? 'Need crew' : activeRemaining > 0 ? `${Math.ceil(activeRemaining)}s` : ready ? 'Ready' : `${Math.ceil(cooldownRemaining)}s`,
+        !this.player.alive || this.shopOpen || (!available && activeRemaining <= 0) || (!ready && activeRemaining <= 0),
+        activeRemaining > 0,
+      );
+    }
+  }
+
   private buildUi(): void {
     this.uiRoot.innerHTML = `
       <div class="overlay top-left panel compact-panel" id="flight-hud"></div>
@@ -977,6 +1258,7 @@ export class FlightScene {
         <strong>Flight Test</strong>
         <p class="muted">A reduced Three.js combat slice of the original sandbox plans.</p>
         <div id="flight-debrief" class="muted"></div>
+        <div id="flight-audio-controls"></div>
         <div class="toolbar-row">
           <button class="primary" data-action="return-editor">Return to Editor</button>
           <button data-action="reset">Reset Encounter</button>
@@ -999,8 +1281,10 @@ export class FlightScene {
           <li>1: Shield Boost · 2: Afterburner</li>
           <li>3: Overcharge · 4: Emergency Repair</li>
           <li>Z/X/C/B: Crew Orders</li>
+          ${this.touchControlsEnabled ? '<li>Touch: left stick moves, right aim pad steers fire, buttons trigger dash, abilities, and crew orders</li>' : ''}
         </ul>
       </div>
+      ${this.renderMobileControls()}
     `;
 
     const canvas = this.uiRoot.querySelector('#minimap-canvas') as HTMLCanvasElement | null;
@@ -1014,6 +1298,51 @@ export class FlightScene {
     });
     this.uiRoot.querySelector('[data-action="reset"]')?.addEventListener('click', () => {
       this.spawnEncounter(cloneBlueprint(this.player.blueprint));
+    });
+    this.attachMobileControls();
+    this.refreshFlightAudioControls();
+  }
+
+  private updateAudioSettings(nextSettings: AudioSettings): void {
+    this.audioSettings = nextSettings;
+    persistAudioSettings(this.audioSettings);
+    applySfxSettings(this.audioSettings);
+    applyMusicSettings(this.audioSettings);
+    this.refreshFlightAudioControls();
+  }
+
+  private refreshFlightAudioControls(): void {
+    const audioEl = this.uiRoot.querySelector<HTMLElement>('#flight-audio-controls');
+    if (!audioEl) return;
+    const musicToggle = this.audioSettings.musicMuted ? 'Unmute Music' : 'Mute Music';
+    const sfxToggle = this.audioSettings.sfxMuted ? 'Unmute SFX' : 'Mute SFX';
+    audioEl.innerHTML = `
+      <div class="audio-inline-summary">🎛️ Music ${getAudioPercentLabel(this.audioSettings, 'music')}${this.audioSettings.musicMuted ? ' · muted' : ''} · SFX ${getAudioPercentLabel(this.audioSettings, 'sfx')}${this.audioSettings.sfxMuted ? ' · muted' : ''}</div>
+      <div class="toolbar-row compact-toolbar-row">
+        <button data-audio-step="-0.1" data-audio-channel="music">Music −</button>
+        <button data-audio-step="0.1" data-audio-channel="music">Music +</button>
+        <button data-audio-toggle="music">${musicToggle}</button>
+      </div>
+      <div class="toolbar-row compact-toolbar-row">
+        <button data-audio-step="-0.1" data-audio-channel="sfx">SFX −</button>
+        <button data-audio-step="0.1" data-audio-channel="sfx">SFX +</button>
+        <button data-audio-toggle="sfx">${sfxToggle}</button>
+      </div>
+    `;
+    audioEl.querySelectorAll<HTMLButtonElement>('[data-audio-toggle]').forEach((button) => {
+      button.onclick = () => {
+        const channel = button.dataset.audioToggle as AudioChannel | undefined;
+        if (!channel) return;
+        this.updateAudioSettings(toggleAudioMuted(this.audioSettings, channel));
+      };
+    });
+    audioEl.querySelectorAll<HTMLButtonElement>('[data-audio-step]').forEach((button) => {
+      button.onclick = () => {
+        const channel = button.dataset.audioChannel as AudioChannel | undefined;
+        const delta = Number(button.dataset.audioStep ?? 0);
+        if (!channel || !delta) return;
+        this.updateAudioSettings(stepAudioVolume(this.audioSettings, channel, delta));
+      };
     });
   }
 
@@ -1157,6 +1486,8 @@ export class FlightScene {
 
     this.currentWave = 1;
     this.encounterOutcome = 'continue';
+    this.clearMobileInputs();
+    this.chronicleSaved = false;
     this.waveDelay = 0;
     this.waveAnnouncement = 'Wave 1 engaged';
     this.hasGrantedReward = false;
@@ -1202,10 +1533,13 @@ export class FlightScene {
     this.crewOrderAnnouncementTimer = 0;
     this.clearCrewOrderMarkers();
     this.shopWaveCleared = 0;
+    this.shopTargetWave = 1;
     this.legacyFinalized = false;
     this.legacyNewMilestones = [];
     this.runSalvagedEntries = [];
+    this.runCorruptedEntries = [];
     this.nemesisShip = null;
+    this.nemesisKillsThisRun = 0;
     this.nemesisAnnouncement = '';
     this.nemesisAnnouncementTimer = 0;
     this.mutagenState = { ...this.mutagenState, pendingEssence: [] };
@@ -1217,6 +1551,10 @@ export class FlightScene {
     this.crisisEliteKillBuffTimer = 0;
     this.crisisDashGhostTimer = 0;
     this.crisisDashGhostShip = null;
+    this.arenaRift = null;
+    this.lastRiftType = null;
+    this.riftEventsSurvived = 0;
+    this.clearRiftVisuals();
     // Reset wingman for new run and redeploy immediately if one is assigned.
     if (this.wingmanState.config) {
       this.wingmanState = startWingmanRun(this.wingmanState.config);
@@ -1299,6 +1637,7 @@ export class FlightScene {
     } else if (this.arenaRift) {
       this.arenaRift.wavesRemaining -= 1;
       if (this.arenaRift.wavesRemaining <= 0) {
+        this.riftEventsSurvived += 1;
         playRiftDeactivate();
         this.clearRiftVisuals();
         this.arenaRift = null;
@@ -1500,6 +1839,9 @@ export class FlightScene {
 
   private updatePlayer(dt: number): void {
     if (!this.player.alive) return;
+    if (this.mobileFireHeld && this.mobileAimInput.magnitude > 0.01) {
+      this.syncMobileAimTarget();
+    }
     const desiredRotation = Math.atan2(
       this.mouseWorld.x - this.player.position.x,
       this.mouseWorld.z - this.player.position.z,
@@ -1515,71 +1857,12 @@ export class FlightScene {
 
     // ── Dash (Space) — before velocity so the first frame of dash is not wasted ──
     if (this.keys.has('Space') && canDash(this.dashState)) {
-      const shipRot = this.player.group.rotation.y;
-      const crisisDashMult = getDashCooldownMult(this.crisisState.activeEffects);
-      const effectiveReduction = 1 - (1 - this.effectiveStats.dashCooldownReduction) * crisisDashMult * this.sigilEffects.dashCooldownMult;
-      this.dashState = startDash(
-        this.dashState, forward.x, forward.z, right.x, right.z,
-        shipRot, effectiveReduction,
-      );
-      if (this.isEndlessMode) this.runStats.dashCount += 1;
-      this.particles.emit(ParticleSystem.dashBurst(this.player.position));
-      // Sigil: Void Walker — dash grants shield
-      if (this.sigilEffects.shieldOnDash > 0) {
-        this.player.shield = Math.min(
-          this.player.maxShield + this.sigilEffects.shieldOnDash,
-          this.player.shield + this.sigilEffects.shieldOnDash,
-        );
-      }
-      // Crisis: Time Echo — spawn a ghost copy at dash origin that auto-fires
-      const ghostDuration = getDashGhostDuration(this.crisisState.activeEffects);
-      if (ghostDuration > 0 && !this.crisisDashGhostShip) {
-        // Clone the player's group for a visual ghost
-        const ghostGroup = this.player.group.clone();
-        ghostGroup.traverse((child) => {
-          if ((child as THREE.Mesh).isMesh) {
-            const mesh = child as THREE.Mesh;
-            if (mesh.material instanceof THREE.Material) {
-              const mat = mesh.material.clone();
-              mat.transparent = true;
-              mat.opacity = 0.35;
-              if ('color' in mat) (mat as THREE.MeshBasicMaterial).color.set('#a78bfa');
-              mesh.material = mat;
-            }
-          }
-        });
-        this.scene.add(ghostGroup);
-        this.crisisDashGhostShip = {
-          id: 'dash-ghost',
-          team: 'player',
-          alive: true,
-          hp: 1,
-          position: this.player.position.clone(),
-          velocity: new THREE.Vector3(),
-          rotation: this.player.rotation,
-          group: ghostGroup,
-          radius: this.player.radius,
-          blueprint: this.player.blueprint,
-          weapons: [...this.player.weapons],
-          weaponCooldowns: [...this.player.weaponCooldowns],
-          abilities: [],
-          moduleStates: [],
-          moduleMeshes: new Map(),
-          stats: { ...this.player.stats },
-          maxShield: 0,
-          shield: 0,
-          heat: 0,
-          preferredRange: 15,
-          fireJitter: 0.05,
-          powerFactor: 1,
-        };
-        this.crisisDashGhostTimer = ghostDuration;
-      }
+      this.activatePlayerDash();
     }
     this.dashState = updateDash(this.dashState, dt);
 
-    const forwardInput = Number(this.keys.has('KeyW')) - Number(this.keys.has('KeyS'));
-    const strafeInput = Number(this.keys.has('KeyD')) - Number(this.keys.has('KeyA'));
+    const forwardInput = THREE.MathUtils.clamp(Number(this.keys.has('KeyW')) - Number(this.keys.has('KeyS')) + this.mobileMoveInput.y, -1, 1);
+    const strafeInput = THREE.MathUtils.clamp(Number(this.keys.has('KeyD')) - Number(this.keys.has('KeyA')) + this.mobileMoveInput.x, -1, 1);
     const crisisThrustMult = getPlayerThrustMult(this.crisisState.activeEffects);
     const effectiveThrust = getEffectiveThrust(
       Math.max(4, this.player.stats.thrust / 70 * crisisThrustMult * getPilotThrustMultiplier(this.crewOrdersState, this.player.blueprint.crew)),
@@ -1618,7 +1901,7 @@ export class FlightScene {
 
     this.clampToArena(this.player.position);
 
-    if (this.fireHeld) {
+    if (this.fireHeld || (this.mobileFireHeld && this.mobileAimInput.magnitude > 0.08)) {
       this.tryFire(this.player, this.mouseWorld.clone().sub(this.player.position).normalize());
     }
 
@@ -1636,23 +1919,91 @@ export class FlightScene {
 
     // ── Overdrive (V) ──
     if (this.keys.has('KeyV') && canActivateOverdrive(this.overdriveState)) {
-      const wasActive = isOverdriveActive(this.overdriveState);
-      this.overdriveState = activateOverdrive(this.overdriveState);
-      if (!wasActive && isOverdriveActive(this.overdriveState)) {
-        if (this.isEndlessMode) this.runStats.overdriveActivations += 1;
-        this.screenShake = createScreenShake(0.4, 0.35);
-        for (const config of ParticleSystem.deathExplosion(this.player.position)) {
-          this.particles.emit(config);
-        }
-        playOverdriveActivate();
-      }
+      this.activatePlayerOverdrive();
     }
 
     this.syncShipTransform(this.player);
   }
 
-  private tryPlayerAbility(keyCode: string, abilityId: AbilityId): void {
-    if (!this.keys.has(keyCode)) return;
+  private activatePlayerDash(): void {
+    if (!this.player.alive || this.shopOpen || !canDash(this.dashState)) return;
+    const forward = new THREE.Vector3(Math.sin(this.player.rotation), 0, Math.cos(this.player.rotation));
+    const right = new THREE.Vector3(Math.cos(this.player.rotation), 0, -Math.sin(this.player.rotation));
+    const shipRot = this.player.group.rotation.y;
+    const crisisDashMult = getDashCooldownMult(this.crisisState.activeEffects);
+    const effectiveReduction = 1 - (1 - this.effectiveStats.dashCooldownReduction) * crisisDashMult * this.sigilEffects.dashCooldownMult;
+    this.dashState = startDash(
+      this.dashState, forward.x, forward.z, right.x, right.z,
+      shipRot, effectiveReduction,
+    );
+    if (this.isEndlessMode) this.runStats.dashCount += 1;
+    this.particles.emit(ParticleSystem.dashBurst(this.player.position));
+    if (this.sigilEffects.shieldOnDash > 0) {
+      this.player.shield = Math.min(
+        this.player.maxShield + this.sigilEffects.shieldOnDash,
+        this.player.shield + this.sigilEffects.shieldOnDash,
+      );
+    }
+    const ghostDuration = getDashGhostDuration(this.crisisState.activeEffects);
+    if (ghostDuration > 0 && !this.crisisDashGhostShip) {
+      const ghostGroup = this.player.group.clone();
+      ghostGroup.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          const mesh = child as THREE.Mesh;
+          if (mesh.material instanceof THREE.Material) {
+            const mat = mesh.material.clone();
+            mat.transparent = true;
+            mat.opacity = 0.35;
+            if ('color' in mat) (mat as THREE.MeshBasicMaterial).color.set('#a78bfa');
+            mesh.material = mat;
+          }
+        }
+      });
+      this.scene.add(ghostGroup);
+      this.crisisDashGhostShip = {
+        id: 'dash-ghost',
+        team: 'player',
+        alive: true,
+        hp: 1,
+        position: this.player.position.clone(),
+        velocity: new THREE.Vector3(),
+        rotation: this.player.rotation,
+        group: ghostGroup,
+        radius: this.player.radius,
+        blueprint: this.player.blueprint,
+        weapons: [...this.player.weapons],
+        weaponCooldowns: [...this.player.weaponCooldowns],
+        abilities: [],
+        moduleStates: [],
+        moduleMeshes: new Map(),
+        stats: { ...this.player.stats },
+        maxShield: 0,
+        shield: 0,
+        heat: 0,
+        preferredRange: 15,
+        fireJitter: 0.05,
+        powerFactor: 1,
+      };
+      this.crisisDashGhostTimer = ghostDuration;
+    }
+  }
+
+  private activatePlayerOverdrive(): void {
+    if (!this.player.alive || this.shopOpen || !canActivateOverdrive(this.overdriveState)) return;
+    const wasActive = isOverdriveActive(this.overdriveState);
+    this.overdriveState = activateOverdrive(this.overdriveState);
+    if (!wasActive && isOverdriveActive(this.overdriveState)) {
+      if (this.isEndlessMode) this.runStats.overdriveActivations += 1;
+      this.screenShake = createScreenShake(0.4, 0.35);
+      for (const config of ParticleSystem.deathExplosion(this.player.position)) {
+        this.particles.emit(config);
+      }
+      playOverdriveActivate();
+    }
+  }
+
+  private activatePlayerAbility(abilityId: AbilityId): void {
+    if (!this.player.alive || this.shopOpen) return;
     if (activateAbility(this.player.abilities, abilityId)) {
       this.runStats.abilityActivations += 1;
 
@@ -1700,11 +2051,23 @@ export class FlightScene {
     }
   }
 
+  private tryPlayerAbility(keyCode: string, abilityId: AbilityId): void {
+    if (!this.keys.has(keyCode)) return;
+    this.activatePlayerAbility(abilityId);
+  }
+
   private tryCrewOrder(id: CrewOrderId): void {
     const def = getCrewOrderDef(id);
     const keyCode = `Key${def.hotkey}`;
+    if (!this.keys.has(keyCode)) return;
+    this.activateCrewOrder(id);
+  }
+
+  private activateCrewOrder(id: CrewOrderId): void {
+    if (!this.player.alive || this.shopOpen) return;
+    const def = getCrewOrderDef(id);
     const crew = this.player.blueprint.crew;
-    if (!this.keys.has(keyCode) || !canActivateCrewOrder(this.crewOrdersState, id, crew)) return;
+    if (!canActivateCrewOrder(this.crewOrdersState, id, crew)) return;
 
     if (id === 'pilot_surge') {
       this.crewOrdersState = activatePilotSurge(this.crewOrdersState, crew);
@@ -2444,6 +2807,8 @@ export class FlightScene {
         }
       }
 
+      this.handleContractHullDamage(result.hullDamage);
+
       // Sigil: module destruction reduction (Ironclad tier 2)
       const sigilModDmg = isPlayerShip ? this.sigilEffects.moduleDestructionMult : 1;
       const destroyed = damageModules(ship.moduleStates, result.hullDamage * sigilModDmg, hitAngle, 0.6);
@@ -2505,14 +2870,7 @@ export class FlightScene {
       this.handleNemesisKilled(ship);
       // Blueprint scavenging (elite/boss kill)
       this.handleSalvageOnKill(ship);
-      if (this.isEndlessMode && ship.team === 'enemy' && this.activeContract?.kind === 'priority_target') {
-        const contractHit = registerPriorityTargetKill(this.activeContract, ship.id);
-        if (isTerminalContract(contractHit)) {
-          this.resolveActiveContract(contractHit);
-        } else {
-          this.activeContract = contractHit;
-        }
-      }
+      this.handleContractEnemyKill(ship);
       // Mutagen: collect essence from elite/boss kills
       if (this.isEndlessMode && ship.team === 'enemy') {
         const killedAffixes = this.shipAffixes.get(ship.id);
@@ -2939,7 +3297,7 @@ export class FlightScene {
         }
 
         // Open upgrade shop instead of immediately spawning next wave
-        this.openUpgradeShop(this.currentWave);
+        this.openUpgradeShop(this.currentWave - 1);
       }
 
       this.waveAnnouncement = this.isEndlessMode
@@ -3532,6 +3890,11 @@ export class FlightScene {
 
   private refreshHud(): void {
     const hud = this.uiRoot.querySelector('#flight-hud');
+    const mobileControls = this.uiRoot.querySelector<HTMLElement>('#mobile-controls');
+    if (mobileControls) {
+      mobileControls.style.display = this.shopOpen ? 'none' : 'flex';
+    }
+    this.syncMobileControls();
 
     // When shop is open, replace HUD with upgrade selection UI
     if (this.shopOpen && hud) {
@@ -3652,24 +4015,25 @@ export class FlightScene {
           </button>
         </div>`;
       }).join('');
-      const acceptedContractHtml = this.activeContract && this.activeContract.waveNumber === this.shopWaveCleared
+      const acceptedContractHtml = this.activeContract && this.activeContract.waveNumber === this.shopTargetWave
         ? `<div class="contract-status-box" style="margin-bottom:8px;border-color:${this.activeContract.color};background:rgba(${parseInt(this.activeContract.color.slice(1,3),16)},${parseInt(this.activeContract.color.slice(3,5),16)},${parseInt(this.activeContract.color.slice(5,7),16)},0.08)">
-            <strong style="color:${this.activeContract.color}">${this.activeContract.icon} Contract locked for Wave ${this.shopWaveCleared}</strong>
+            <strong style="color:${this.activeContract.color}">${this.activeContract.icon} Contract locked for Wave ${this.shopTargetWave}</strong>
             <div style="margin-top:4px;color:#e2e8f0">${this.activeContract.displayName} — ${this.activeContract.description}</div>
             <div style="margin-top:4px;font-size:0.8em;color:${this.activeContract.color}">${this.renderContractReward(this.activeContract)}</div>
           </div>`
         : '';
       const upgradeCards = this.shopOptions.map((u, i) => {
-        const cost = upgradeCost(u, this.shopWaveCleared);
-        const canAfford = this.endlessCredits >= cost;
         const rarityColor = getRarityColor(u.rarity);
+        const offerCost = this.getUpgradePurchaseCost(u);
+        const canAfford = this.endlessCredits >= offerCost.cost;
+        const priceLabel = offerCost.isFree ? 'Free' : `${offerCost.cost} credits`;
         return `<div class="upgrade-card" style="border-color:${rarityColor};opacity:${canAfford ? 1 : 0.5}">
           <div style="font-size:1.3em">${u.icon}</div>
           <strong style="color:${rarityColor}">${u.displayName}</strong>
           <small style="color:${rarityColor}">${getRarityLabel(u.rarity)}</small>
           <p style="margin:4px 0">${u.description}</p>
           <button class="primary" data-upgrade="${i}" ${canAfford ? '' : 'disabled'} style="font-size:0.85em">
-            ${cost} credits
+            ${priceLabel}
           </button>
         </div>`;
       }).join('');
@@ -3697,15 +4061,17 @@ export class FlightScene {
         if (!def) return '';
         const existingStacks = getMutationStacks(this.mutagenState.mutations, e.affixId);
         const isStacking = existingStacks > 0;
-        return `<div class="upgrade-card" style="border-color:${def.color};background:rgba(${parseInt(def.color.slice(1,3),16)},${parseInt(def.color.slice(3,5),16)},${parseInt(def.color.slice(5,7),16)},0.06)">
+        const canAbsorb = isStacking || canAbsorbNew(this.mutagenState);
+        return `<div class="upgrade-card" style="border-color:${def.color};background:rgba(${parseInt(def.color.slice(1,3),16)},${parseInt(def.color.slice(3,5),16)},${parseInt(def.color.slice(5,7),16)},0.06);opacity:${canAbsorb ? '1' : '0.65'}">
           <div style="font-size:0.7em;color:${def.color};margin-bottom:2px">🧬 ESSENCE — Free</div>
           <div style="font-size:1.3em">${def.icon}</div>
           <strong style="color:${def.color}">${def.displayName}</strong>
           ${isStacking ? `<small style="color:${def.color}">→ ${existingStacks + 1} stacks</small>` : '<small style="color:#94a3b8">New mutation</small>'}
           <p style="margin:4px 0">${def.description}</p>
           <small style="color:#64748b;font-style:italic">${isStacking ? def.stackDescription : def.flavor}</small>
-          <button class="primary" data-absorb="${i}" style="font-size:0.85em;background:${def.color};border-color:${def.color}">
-            Absorb
+          ${!canAbsorb ? '<div style="color:#fca5a5;font-size:0.76em;margin-top:4px">Mutation lattice full — stack an existing trait instead.</div>' : ''}
+          <button class="primary" data-absorb="${i}" ${canAbsorb ? '' : 'disabled'} style="font-size:0.85em;background:${def.color};border-color:${def.color}">
+            ${canAbsorb ? 'Absorb' : 'Locked'}
           </button>
         </div>`;
       }).join('');
@@ -3713,6 +4079,7 @@ export class FlightScene {
       hud.innerHTML = `
         <div style="text-align:center;margin-bottom:8px">
           <strong style="font-size:1.1em;color:#e2e8f0">⚡ Upgrade Shop — Wave ${this.shopWaveCleared} Cleared</strong>
+          <p style="color:#94a3b8;font-size:0.85em;margin-top:4px">Prep for Wave ${this.shopTargetWave}</p>
           ${restRepair ? '<p class="success">🔧 Rest stop: hull partially repaired!</p>' : ''}
         </div>
         ${acceptedContractHtml}
@@ -3891,6 +4258,7 @@ export class FlightScene {
         const tierLabel = ['I', 'II', 'III'][this.sigilState.currentTier - 1] ?? '';
         return `<div class="ability-bar" style="justify-content:center;gap:6px;border-color:${def.color}"><span style="color:${def.color};font-size:0.7em;font-weight:600">SIGIL</span><div class="ability-slot active" title="${def.displayName} Tier ${tierLabel}: ${def.tagline}" style="border-color:${def.color}"><span class="ability-icon">${def.icon}</span></div><span style="color:#e2e8f0;font-size:0.75em">${def.displayName}</span><span style="color:${def.color};font-size:0.7em">T${tierLabel}</span>${this.sigilState.killStreak > 1 ? `<span style="color:#f97316;font-size:0.7em">🔥×${this.sigilState.killStreak}</span>` : ''}</div>`;
       })() : ''}
+      ${this.crisisState.activeEffects.length > 0 ? `<div class="ability-bar" style="justify-content:center;gap:6px;border-color:#fbbf24"><span style="color:#fbbf24;font-size:0.7em;font-weight:600">CRISIS</span>${getActiveEffectLabels(this.crisisState.activeEffects).map((effect) => `<div class="ability-slot active" title="${effect.name}" style="border-color:${effect.color}"><span class="ability-icon">${effect.icon}</span></div>`).join('')}</div>` : ''}
       ${hasMutations(this.mutagenState) ? `
         <div class="ability-bar" style="border-color:#34d399;margin-top:2px">
           <span style="color:#34d399;font-size:0.7em;font-weight:600">MUTATIONS</span>
@@ -3918,7 +4286,7 @@ export class FlightScene {
           waveReached: this.endlessBestWave || (this.currentWave - 1),
           totalKills: this.endlessTotalKills,
           score: this.endlessScore,
-          creditsEarned: this.endlessCredits,
+          creditsEarned: this.runStats.creditsEarned,
           timeSeconds: this.elapsedEncounterSeconds,
           hpRemaining: Math.max(0, this.player.hp),
           maxHp: this.player.stats.maxHp,
@@ -3938,23 +4306,40 @@ export class FlightScene {
         // Finalize legacy progression (idempotent)
         this.finalizeLegacyRun(this.buildLegacySnapshot(grade));
 
-        // Save run to pilot chronicle
-        try {
-          saveRunRecord(buildRunRecord({
-            stats: s,
-            shipName: this.player.blueprint.name,
-            sigil: this.sigilState.activeId ? { id: this.sigilState.activeId, tier: this.sigilState.currentTier } : null,
-            mutators: s.mutatorsChosen,
-            upgrades: s.upgradesPurchased,
-            crisisChoices: [],
-          }));
-        } catch { /* chronicle unavailable — non-critical */ }
+        // Save run to pilot chronicle once per run.
+        if (!this.chronicleSaved) {
+          try {
+            saveRunRecord(buildRunRecord({
+              stats: s,
+              shipName: this.player.blueprint.name,
+              sigil: this.sigilState.activeId ? { id: this.sigilState.activeId, tier: this.sigilState.currentTier } : null,
+              mutators: s.mutatorsChosen,
+              upgrades: s.upgradesPurchased,
+              crisisChoices: [...this.crisisState.activeEffects],
+              nemesisKills: this.nemesisKillsThisRun,
+              riftsSurvived: this.riftEventsSurvived,
+            }));
+            this.chronicleSaved = true;
+          } catch { /* chronicle unavailable — non-critical */ }
+        }
         const legacySummary = getLegacySummary(this.legacyState);
         const legacyXpGained = computeLegacyXp(this.buildLegacySnapshot(grade));
         const milestoneTags = this.legacyNewMilestones.length > 0
           ? this.legacyNewMilestones.map((m) =>
               `<span style="display:inline-block;background:#7c3aed20;color:#c084fc;padding:2px 8px;border-radius:4px;font-size:0.8em;margin:2px">${m.icon} ${m.displayName}</span>`
             ).join('')
+          : '';
+        const wingmanDebrief = this.wingmanState.config
+          ? `<div style="background:#0f172a;border-radius:6px;padding:8px;margin-bottom:6px;border:1px solid rgba(96,165,250,0.18)"><div style="font-size:0.8em;color:#93c5fd;font-weight:600;margin-bottom:4px">🛡 Wingman Contribution</div><div style="display:grid;grid-template-columns:1fr auto;gap:4px 10px;font-size:0.78em;color:#cbd5e1"><span>Escort</span><span>${this.wingmanState.config.name}</span><span>Status</span><span>${this.wingmanState.active ? 'Operational' : this.wingmanState.totalKills > 0 || this.wingmanState.totalDamageDealt > 0 ? 'Shot down' : 'No deployment impact'}</span><span>Kills</span><span>${this.wingmanState.totalKills}</span><span>Damage dealt</span><span>${Math.round(this.wingmanState.totalDamageDealt)}</span></div></div>`
+          : '';
+        const essenceDebrief = this.mutagenState.pendingEssence.length > 0
+          ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${this.mutagenState.pendingEssence.map((essence) => `<span style="display:inline-flex;align-items:center;gap:4px;background:#062f24;color:#6ee7b7;border:1px solid rgba(52,211,153,0.28);padding:2px 8px;border-radius:999px;font-size:0.74em">🧬 ${essence.affixId} · W${essence.waveNumber}</span>`).join('')}</div>`
+          : '';
+        const careerGains = (this.runSalvagedEntries.length > 0 || this.runCorruptedEntries.length > 0 || this.mutagenState.pendingEssence.length > 0)
+          ? `<div style="background:#111827;border-radius:6px;padding:8px;margin-bottom:6px;border:1px solid rgba(148,163,184,0.14)"><div style="font-size:0.8em;color:#e2e8f0;font-weight:600;margin-bottom:4px">Career Gains</div><div style="display:grid;grid-template-columns:1fr auto;gap:4px 10px;font-size:0.78em;color:#cbd5e1"><span>Blueprints salvaged</span><span>${this.runSalvagedEntries.length}</span><span>Corrupted modules extracted</span><span>${this.runCorruptedEntries.length}</span><span>Essence secured</span><span>${this.mutagenState.pendingEssence.length}</span></div>${this.runSalvagedEntries.length > 0 ? `<div style="margin-top:6px">${this.runSalvagedEntries.map((entry) => { const rc = RARITY_CONFIG[entry.rarity]; return `<span style="display:inline-block;margin:2px 6px 0 0;color:${rc.color};font-size:0.76em">🔧 ${entry.name}</span>`; }).join('')}</div>` : ''}${this.runCorruptedEntries.length > 0 ? `<div style="margin-top:6px">${this.runCorruptedEntries.map((entry) => `<span style="display:inline-block;margin:2px 6px 0 0;color:${entry.sourceColor};font-size:0.76em">🧬 ${entry.displayName}</span>`).join('')}</div>` : ''}${essenceDebrief}</div>`
+          : '';
+        const chronicleDebrief = (this.crisisState.activeEffects.length > 0 || this.nemesisKillsThisRun > 0 || this.riftEventsSurvived > 0)
+          ? `<div style="background:#1f2937;border-radius:6px;padding:8px;margin-bottom:6px;border:1px solid rgba(244,114,182,0.16)"><div style="font-size:0.8em;color:#f9a8d4;font-weight:600;margin-bottom:4px">Chronicle Notes</div><div style="display:grid;grid-template-columns:1fr auto;gap:4px 10px;font-size:0.78em;color:#cbd5e1"><span>Crisis effects carried</span><span>${this.crisisState.activeEffects.length}</span><span>Nemesis kills</span><span>${this.nemesisKillsThisRun}</span><span>Rifts survived</span><span>${this.riftEventsSurvived}</span></div>${this.crisisState.activeEffects.length > 0 ? `<div style="margin-top:6px;color:#fbcfe8;font-size:0.76em">${this.crisisState.activeEffects.join(' · ')}</div>` : ''}</div>`
           : '';
         const xpPct = legacySummary.xpForNext > 0
           ? Math.min(100, Math.floor((legacySummary.currentXp / legacySummary.xpForNext) * 100))
@@ -3993,7 +4378,9 @@ export class FlightScene {
             return `<div style="font-size:0.8em;margin-bottom:4px"><span style="color:#94a3b8">Sigil:</span> <span style="color:${def.color};font-weight:600">${def.icon} ${def.displayName}</span> <span style="color:#64748b">Tier ${tierLabel}</span></div>`;
           })() : ''}
           <div style="font-size:0.8em;color:#fb7185;margin-bottom:6px">${cause}</div>
-          ${this.runSalvagedEntries.length > 0 ? `<div style="background:#1e1b4b;border-radius:6px;padding:8px;margin-bottom:6px"><div style="font-size:0.8em;color:#c084fc;font-weight:600;margin-bottom:4px">🔧 Blueprints Salvaged (${this.runSalvagedEntries.length})</div>${this.runSalvagedEntries.map((e) => { const rc = RARITY_CONFIG[e.rarity]; return `<div style="display:flex;align-items:center;gap:6px;margin-top:3px"><span style="color:${rc.color};font-weight:600;font-size:0.8em">${rc.label}</span><span style="color:#e2e8f0;font-size:0.8em">${e.name}</span></div>`; }).join('')}</div>` : ''}
+          ${wingmanDebrief}
+          ${careerGains}
+          ${chronicleDebrief}
           <div style="background:#0f172a;border-left:3px solid #38bdf8;padding:6px 8px;border-radius:0 4px 4px 0;font-size:0.8em;color:#94a3b8;margin-bottom:6px">
             <strong style="color:#38bdf8">Next run:</strong> ${tip}
           </div>
@@ -4072,11 +4459,7 @@ export class FlightScene {
   }
 
   private updateMouseWorld(event: PointerEvent): void {
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    this.raycaster.setFromCamera(this.pointer, this.camera);
-    this.raycaster.ray.intersectPlane(this.groundPlane, this.mouseWorld);
+    this.updateMouseWorldFromClientPoint(event.clientX, event.clientY);
   }
 
   // ── Hazard System ──────────────────────────────────────────────
@@ -4330,6 +4713,7 @@ export class FlightScene {
               if (isPlayerShip) this.runStats.damageTaken += resolved.hullDamage;
               else this.runStats.damageDealt += resolved.hullDamage;
             }
+            this.handleContractHullDamage(isPlayerShip ? resolved.hullDamage : 0);
           }
           if (ship.hp <= 0) {
             ship.alive = false;
@@ -4346,14 +4730,7 @@ export class FlightScene {
             this.handleNemesisKilled(ship);
             // Blueprint scavenging (elite/boss kill — beam death path)
             this.handleSalvageOnKill(ship);
-            if (this.isEndlessMode && ship.team === 'enemy' && this.activeContract?.kind === 'priority_target') {
-              const contractHit = registerPriorityTargetKill(this.activeContract, ship.id);
-              if (isTerminalContract(contractHit)) {
-                this.resolveActiveContract(contractHit);
-              } else {
-                this.activeContract = contractHit;
-              }
-            }
+            this.handleContractEnemyKill(ship);
             // Mutagen: collect essence from elite/boss kills (beam path)
             if (this.isEndlessMode && ship.team === 'enemy') {
               const essenceAffixes = this.shipAffixes.get(ship.id);
@@ -5049,6 +5426,32 @@ export class FlightScene {
     }
   }
 
+  private handleContractEnemyKill(ship: RuntimeShip): void {
+    if (!this.isEndlessMode || ship.team !== 'enemy' || !this.activeContract) return;
+
+    let next = this.activeContract;
+    next = registerPriorityTargetKill(next, ship.id);
+    next = registerContractKill(next);
+
+    if (next === this.activeContract) return;
+    if (isTerminalContract(next)) {
+      this.resolveActiveContract(next);
+      return;
+    }
+    this.activeContract = next;
+  }
+
+  private handleContractHullDamage(hullDamage: number): void {
+    if (!this.isEndlessMode || hullDamage <= 0 || !this.activeContract) return;
+    const next = registerContractHullDamage(this.activeContract, hullDamage);
+    if (next === this.activeContract) return;
+    if (isTerminalContract(next)) {
+      this.resolveActiveContract(next);
+      return;
+    }
+    this.activeContract = next;
+  }
+
   private resolveActiveContract(contract: ActiveContract): void {
     this.clearContractMarkers();
     if (contract.status === 'completed') {
@@ -5163,9 +5566,10 @@ export class FlightScene {
 
   private openUpgradeShop(waveCleared: number): void {
     this.shopWaveCleared = waveCleared;
-    this.shopOptions = generateUpgradeOptions(waveCleared, this.purchasedUpgrades);
-    this.shopMutatorOptions = this.generateMutatorOptions(waveCleared);
-    this.contractOffers = generateContractOffers(waveCleared, isBossWave(waveCleared));
+    this.shopTargetWave = Math.max(1, waveCleared + 1);
+    this.shopOptions = generateUpgradeOptions(this.shopTargetWave, this.purchasedUpgrades);
+    this.shopMutatorOptions = this.generateMutatorOptions(this.shopTargetWave);
+    this.contractOffers = generateContractOffers(this.shopTargetWave, isBossWave(this.shopTargetWave));
 
     // Free hull repair every 5 waves
     if (waveCleared > 0 && waveCleared % 5 === 0) {
@@ -5177,20 +5581,26 @@ export class FlightScene {
     this.waveAnnouncement = `Wave ${waveCleared} cleared! Choose an upgrade or skip.`;
   }
 
+  private getUpgradePurchaseCost(upgrade: UpgradeDef) {
+    const targetWave = Math.max(1, this.shopTargetWave || this.shopWaveCleared || 1);
+    return getUpgradeOfferCost({
+      baseCost: upgradeCost(upgrade, targetWave),
+      crisisCostReduction: getUpgradeCostReduction(this.crisisState.activeEffects),
+      sigilCostMult: getShopCostMult(this.sigilState),
+      hasFreePurchase: isFreePurchaseWave(this.sigilState),
+    });
+  }
+
   private purchaseUpgrade(upgrade: UpgradeDef): void {
-    const crisisCostReduction = getUpgradeCostReduction(this.crisisState.activeEffects);
-    const sigilCostMult = getShopCostMult(this.sigilState);
-    let cost = Math.floor(upgradeCost(upgrade, this.shopWaveCleared) * (1 - crisisCostReduction) * sigilCostMult);
-    // Sigil: War Economy tier 3 — free first purchase each wave
-    if (isFreePurchaseWave(this.sigilState) && cost > 0) {
-      cost = 0;
+    const offerCost = this.getUpgradePurchaseCost(upgrade);
+    if (this.endlessCredits < offerCost.cost) return;
+
+    this.endlessCredits -= offerCost.cost;
+    if (offerCost.consumesFreePurchase) {
       this.sigilState = consumeFreePurchase(this.sigilState);
     }
-    if (this.endlessCredits < cost) return;
-
-    this.endlessCredits -= cost;
     this.upgradeStats = applyUpgrade(this.upgradeStats, upgrade);
-    this.purchasedUpgrades.push({ def: upgrade, wavePurchased: this.shopWaveCleared });
+    this.purchasedUpgrades.push({ def: upgrade, wavePurchased: this.shopTargetWave });
     this.runStats.upgradesPurchased.push(upgrade.displayName);
 
     // Rebuild player stats from base + all upgrade bonuses
@@ -5515,6 +5925,7 @@ export class FlightScene {
 
   private handleNemesisKilled(ship: RuntimeShip): void {
     if (!ship.isNemesis || !this.nemesisState.active) return;
+    this.nemesisKillsThisRun += 1;
     const reward = getNemesisReward(this.nemesisState.active.level);
     const fallenName = this.nemesisState.active.callsign;
     this.endlessCredits += reward.credits;
@@ -5701,6 +6112,7 @@ export class FlightScene {
       });
       if (corrupted) {
         this.lineageLocker = addToLocker(this.lineageLocker, corrupted);
+        this.runCorruptedEntries.push(corrupted);
         persistLineageLocker(this.lineageLocker);
         const bossTag = corrupted.wasBoss ? ' 👑 Boss' : '';
         this.lineageAnnouncement = `🧬 ${corrupted.displayName}${bossTag}`;
@@ -5878,7 +6290,7 @@ export class FlightScene {
       eliteKills: this.runStats.eliteKills,
       bossKills: this.runStats.bossKills,
       score: this.endlessScore,
-      creditsEarned: this.endlessCredits,
+      creditsEarned: this.runStats.creditsEarned,
       timeSeconds: this.elapsedEncounterSeconds,
       bestCombo: this.runStats.bestCombo,
       highestComboTier: this.runStats.highestComboTier,
@@ -6011,14 +6423,10 @@ export class FlightScene {
         this.applyDamage(ship, state.edgeDps / 60, 'energy', 0, 0);
       }
     }
-    if (isOutsideVoidCollapse(state, this.player.position.x, this.player.position.z)) {
-      this.applyDamage(this.player, state.edgeDps / 60, 'energy', 0, 0);
-    }
   }
 
   private applyRiftGravityForces(state: GravityWellState, dt: number): void {
-    const allShips = [...this.ships, this.player];
-    for (const ship of allShips) {
+    for (const ship of this.ships) {
       const force = getRiftGravityForce(state, ship.position.x, ship.position.z);
       if (force) {
         ship.position.x += force.fx * dt;
@@ -6042,8 +6450,7 @@ export class FlightScene {
 
   private applyRiftShockwaveForces(state: ShockwaveState, dt: number): void {
     if (!state.waveActive) return;
-    const allShips = [...this.ships, this.player];
-    for (const ship of allShips) {
+    for (const ship of this.ships) {
       const force = getRiftShockwaveForce(state, ship.position.x, ship.position.z);
       if (force) {
         ship.velocity.x += force.fx * dt;

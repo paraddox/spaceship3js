@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
+  persistRunRecords,
   saveRunRecord,
   loadAllRecords,
   loadRecentRuns,
@@ -100,6 +101,36 @@ describe('saveRunRecord / loadAllRecords', () => {
     expect(loaded).toHaveLength(100);
     // Newest first — highest wave numbers at the front
     expect(loaded[0].stats.waveReached).toBe(104);
+  });
+
+  it('persists an imported chronicle list with the same 100-run cap', () => {
+    const imported = Array.from({ length: 105 }, (_, index) => makeRecord({ waveReached: index }));
+    persistRunRecords(imported);
+    const loaded = loadAllRecords();
+    expect(loaded).toHaveLength(100);
+    expect(loaded[0].stats.waveReached).toBe(0);
+    expect(loaded[loaded.length - 1]?.stats.waveReached).toBe(99);
+  });
+});
+
+describe('buildRunRecord', () => {
+  it('preserves chronicle-only metadata fields', () => {
+    const record = buildRunRecord({
+      stats: mockRun({ totalKills: 12 }),
+      shipName: 'Void Spear',
+      sigil: { id: 'war_economy', tier: 3 },
+      mutators: ['Glass Cannon'],
+      upgrades: ['Hull Reinforcement'],
+      crisisChoices: ['containment_override', 'volatile_core'],
+      nemesisKills: 2,
+      riftsSurvived: 3,
+    });
+
+    expect(record.shipName).toBe('Void Spear');
+    expect(record.crisisChoices).toEqual(['containment_override', 'volatile_core']);
+    expect(record.nemesisKills).toBe(2);
+    expect(record.riftsSurvived).toBe(3);
+    expect(record.sigil).toEqual({ id: 'war_economy', tier: 3 });
   });
 });
 
