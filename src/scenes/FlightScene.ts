@@ -997,6 +997,102 @@ export class FlightScene {
     canvas.addEventListener('pointermove', this.onPointerMove);
     canvas.addEventListener('pointerdown', this.onPointerDown);
     canvas.addEventListener('pointerup', this.onPointerUp);
+    // Delegated click handler for all shop/sigil/crisis UI inside #flight-hud.
+    // Runs on the stable parent element — no per-frame re-attachment needed.
+    const flightHud = this.uiRoot.querySelector('#flight-hud');
+    if (flightHud) {
+      flightHud.addEventListener('click', (e) => {
+        const target = (e.target as HTMLElement).closest('[data-sigil],[data-crisis],[data-contract],[data-upgrade],[data-mutator],[data-absorb],[data-action]') as HTMLElement | null;
+        if (!target) return;
+
+        // Sigil selection
+        if (target.dataset.sigil) {
+          if (!this.sigilSelectionOpen) return;
+          const sigilId = target.dataset.sigil as SigilId;
+          if (!sigilId) return;
+          this.sigilState = activateSigil(this.sigilState, sigilId);
+          this.sigilSelectionOpen = false;
+          this.sigilOffers = [];
+          this.sigilEffects = getSigilEffects(this.sigilState);
+          this.applySigilTradeOffs();
+          this.shopOpen = false;
+          const def = getSigilDef(sigilId);
+          this.sigilAnnouncement = `${def?.icon} ${def?.displayName} — ${def?.tagline}`;
+          this.sigilAnnouncementTimer = 3;
+          this.spawnWave(1);
+          return;
+        }
+
+        // Crisis choice
+        if (target.dataset.crisis) {
+          const effectId = target.dataset.crisis as CrisisEffectId;
+          if (!effectId) return;
+          this.crisisState = resolveCrisisChoice(this.crisisState, effectId);
+          this.crisisState = markCrisisResolved(this.crisisState, this.currentWave);
+
+          if (shouldClearMutations(this.crisisState.activeEffects)) {
+            this.mutagenState = { ...this.mutagenState, mutations: [] };
+            this.mutagenStats = computeMutagenStats([]);
+            persistMutagenState(this.mutagenState);
+            this.rebuildPlayerWithUpgrades();
+          }
+
+          const cdReduction = getAbilityCooldownReduction(this.crisisState.activeEffects);
+          if (cdReduction > 0) {
+            for (const ability of this.player.abilities) {
+              ability.def = { ...ability.def, cooldown: ability.def.cooldown * (1 - cdReduction) };
+            }
+          }
+
+          this.closeUpgradeShop();
+          return;
+        }
+
+        // Contract accept
+        if (target.dataset.contract !== undefined) {
+          const idx = parseInt(target.dataset.contract ?? '0', 10);
+          const offer = this.contractOffers[idx];
+          if (!offer) return;
+          this.activeContract = acceptContract(offer);
+          this.contractOffers = [];
+          this.contractAnnouncement = `📜 Contract accepted — ${offer.displayName}`;
+          this.contractAnnouncementTimer = 2.5;
+          this.refreshHud();
+          return;
+        }
+
+        // Upgrade purchase
+        if (target.dataset.upgrade !== undefined) {
+          const idx = parseInt(target.dataset.upgrade ?? '0', 10);
+          if (this.shopOptions[idx]) this.purchaseUpgrade(this.shopOptions[idx]);
+          return;
+        }
+
+        // Mutator trait
+        if (target.dataset.mutator !== undefined) {
+          const idx = parseInt(target.dataset.mutator ?? '0', 10);
+          if (this.shopMutatorOptions[idx]) this.purchaseMutator(this.shopMutatorOptions[idx]);
+          return;
+        }
+
+        // Mutagen essence absorb
+        if (target.dataset.absorb !== undefined) {
+          const idx = parseInt(target.dataset.absorb ?? '0', 10);
+          this.mutagenState = absorbEssence(this.mutagenState, idx);
+          persistMutagenState(this.mutagenState);
+          this.mutagenStats = computeMutagenStats(this.mutagenState.mutations);
+          this.rebuildPlayerWithUpgrades();
+          this.refreshHud();
+          return;
+        }
+
+        // Skip upgrade button
+        if (target.dataset.action === 'skip-upgrade') {
+          this.closeUpgradeShop();
+          return;
+        }
+      });
+    }
   }
 
   private clearMobileInputs(): void {
@@ -3921,22 +4017,7 @@ export class FlightScene {
           </div>
           <div class="upgrade-grid">${sigilCards}</div>
         `;
-        hud.querySelectorAll('[data-sigil]').forEach((btn) => {
-          btn.addEventListener('click', () => {
-            const sigilId = (btn as HTMLElement).dataset.sigil as SigilId;
-            if (!sigilId) return;
-            this.sigilState = activateSigil(this.sigilState, sigilId);
-            this.sigilSelectionOpen = false;
-            this.sigilOffers = [];
-            this.sigilEffects = getSigilEffects(this.sigilState);
-            this.applySigilTradeOffs();
-            this.shopOpen = false;
-            const def = getSigilDef(sigilId);
-            this.sigilAnnouncement = `${def?.icon} ${def?.displayName} — ${def?.tagline}`;
-            this.sigilAnnouncementTimer = 3;
-            this.spawnWave(1);
-          });
-        });
+        
         this.renderer.render(this.scene, this.camera);
         return;
       }
@@ -3966,34 +4047,6 @@ export class FlightScene {
           ${this.crisisState.activeEffects.length > 0 ? `<div style="margin-top:10px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap">${getActiveEffectLabels(this.crisisState.activeEffects).map((e) => `<span style="background:rgba(${parseInt(e.color.slice(1,3),16)},${parseInt(e.color.slice(3,5),16)},${parseInt(e.color.slice(5,7),16)},0.2);border:1px solid ${e.color};border-radius:4px;padding:2px 6px;font-size:0.75em;color:${e.color}">${e.icon} ${e.name}</span>`).join('')}</div>` : ''}
         `;
 
-        // Bind crisis choice buttons
-        hud.querySelectorAll('[data-crisis]').forEach((btn) => {
-          btn.addEventListener('click', () => {
-            const effectId = (btn as HTMLElement).dataset.crisis as CrisisEffectId;
-            if (!effectId) return;
-            this.crisisState = resolveCrisisChoice(this.crisisState, effectId);
-            this.crisisState = markCrisisResolved(this.crisisState, this.currentWave);
-
-            // Handle adaptive mutation: clear existing mutations and rebuild stats
-            if (shouldClearMutations(this.crisisState.activeEffects)) {
-              this.mutagenState = { ...this.mutagenState, mutations: [] };
-              this.mutagenStats = computeMutagenStats([]);
-              persistMutagenState(this.mutagenState);
-              this.rebuildPlayerWithUpgrades();
-            }
-
-            // Handle containment override: reduce ability cooldowns permanently
-            const cdReduction = getAbilityCooldownReduction(this.crisisState.activeEffects);
-            if (cdReduction > 0) {
-              for (const ability of this.player.abilities) {
-                ability.def = { ...ability.def, cooldown: ability.def.cooldown * (1 - cdReduction) };
-              }
-            }
-
-            // Close crisis and proceed to next wave
-            this.closeUpgradeShop();
-          });
-        });
 
         this.renderer.render(this.scene, this.camera);
         return;
@@ -4097,47 +4150,7 @@ export class FlightScene {
         <p class="muted" style="margin-top:6px">Upgrades: ${this.purchasedUpgrades.length} · ${mutatorSlots} · Score: ${this.endlessScore.toLocaleString()}</p>
       `;
 
-      // Bind contract buttons
-      hud.querySelectorAll('[data-contract]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const idx = parseInt((btn as HTMLElement).dataset.contract ?? '0', 10);
-          const offer = this.contractOffers[idx];
-          if (!offer) return;
-          this.activeContract = acceptContract(offer);
-          this.contractOffers = [];
-          this.contractAnnouncement = `📜 Contract accepted — ${offer.displayName}`;
-          this.contractAnnouncementTimer = 2.5;
-          this.refreshHud();
-        });
-      });
-      // Bind upgrade card buttons
-      hud.querySelectorAll('[data-upgrade]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const idx = parseInt((btn as HTMLElement).dataset.upgrade ?? '0', 10);
-          if (this.shopOptions[idx]) this.purchaseUpgrade(this.shopOptions[idx]);
-        });
-      });
-      hud.querySelector('[data-action="skip-upgrade"]')?.addEventListener('click', () => {
-        this.closeUpgradeShop();
-      });
-      // Bind mutator trait buttons
-      hud.querySelectorAll('[data-mutator]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const idx = parseInt((btn as HTMLElement).dataset.mutator ?? '0', 10);
-          if (this.shopMutatorOptions[idx]) this.purchaseMutator(this.shopMutatorOptions[idx]);
-        });
-      });
-      // Bind mutagen essence absorb buttons
-      hud.querySelectorAll('[data-absorb]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const idx = parseInt((btn as HTMLElement).dataset.absorb ?? '0', 10);
-          this.mutagenState = absorbEssence(this.mutagenState, idx);
-          persistMutagenState(this.mutagenState);
-          this.mutagenStats = computeMutagenStats(this.mutagenState.mutations);
-          this.rebuildPlayerWithUpgrades();
-          this.refreshHud();
-        });
-      });
+
       return;
     }
 
