@@ -388,64 +388,111 @@ export class EditorScene {
         ${this.renderOnboardingBanner()}
         ${this.renderPostFlightBanner()}
         <h1>Spachip3JS</h1>
-        <p class="muted">Godot spaceship plan translated into a browser-friendly editor + flight sandbox.</p>
-        <div class="toolbar-row">
-          <label class="rename-label">Ship name: <input id="ship-name-input" type="text" value="${escapeHtml(this.blueprint.name)}" maxlength="32" /></label>
-        </div>
-        <div id="progression-summary" class="progression-summary"></div>
-        ${this.renderTouchBuilderControls()}
-        <div id="editor-stats" class="stats-grid"></div>
-        <h2>Crew Assignments</h2>
-        <div id="crew-grid" class="crew-grid"></div>
-        <div class="toolbar-row">
-          <button data-action="rotate-left">Rotate ⟲</button>
-          <button data-action="rotate-right">Rotate ⟳</button>
-          <button data-action="clear">Clear Ship</button>
-          <button data-action="reset-crew">Reset Crew</button>
-        </div>
-        <div class="toolbar-row">
-          <button data-action="load-example">Load Example</button>
-          <button data-action="export-json">Copy JSON</button>
-          <button data-action="import-json">Import JSON</button>
-        </div>
-        <h2>Encounter</h2>
-        <div class="encounter-grid">
-          ${ENCOUNTER_PRESETS.map((preset) => `<button class="encounter-button" data-encounter="${preset.id}" title="${preset.description}">${preset.displayName}</button>`).join('')}
-          <button class="encounter-button" data-encounter="endless" title="Infinite procedurally-generated waves with escalating difficulty. Earn credits and push your limits." style="border-color:rgba(251,191,36,0.5);">∞ Endless Gauntlet</button>
-        </div>
-        <div id="encounter-briefing" class="muted"></div>
-        <h2>Endless Prep Bay</h2>
-        <div id="prep-bay-summary" class="progression-summary"></div>
-        <div id="chronicle-grid" class="prep-grid"></div>
-        <div id="legacy-bonus-grid" class="prep-grid"></div>
-        <div id="mutagen-grid" class="prep-grid"></div>
-        <div id="lineage-grid" class="prep-grid"></div>
-        <div id="milestone-grid" class="prep-grid"></div>
-        <div id="audio-settings-grid" class="prep-grid"></div>
-        <div class="toolbar-row">
-          <button data-action="clear-wingman">Clear Wingman</button>
-        </div>
-        <div id="salvage-grid" class="salvage-grid"></div>
-        <h2>Hangar</h2>
-        <div class="toolbar-row">
-          <button data-action="save-hangar">Save Current Ship</button>
-          <button data-action="export-career">Export Career</button>
-          <button data-action="import-career">Import Career</button>
-        </div>
-        <div class="muted">Back up or restore your current ship, hangar, unlocks, chronicle, salvage, lineage, mutagen, and legacy progress.</div>
-        <div id="hangar-grid" class="hangar-grid"></div>
-        <h2>Module Palette</h2>
-        <div class="module-grid">
-          ${this.renderStandardPaletteButtons()}
-        </div>
-        ${this.lineageLocker.modules.length > 0 ? `
-          <h3>Corrupted Locker</h3>
-          <div id="corrupted-module-grid" class="module-grid">${this.renderCorruptedPaletteButtons()}</div>
-        ` : ''}
-        <div id="editor-preview" class="muted"></div>
-        <div id="editor-validation" class="muted"></div>
-        <div class="toolbar-row">
-          <button class="primary" data-action="launch">Launch Flight Test</button>
+
+        <!-- ── Ship (always open) ─────────────────────── -->
+        <details class="sidebar-group" open>
+          <summary class="sidebar-group-header"><span class="sidebar-group-icon">🚀</span> Ship</summary>
+          <div class="sidebar-group-body">
+            <div class="toolbar-row">
+              <label class="rename-label">Name: <input id="ship-name-input" type="text" value="${escapeHtml(this.blueprint.name)}" maxlength="32" /></label>
+            </div>
+            <div id="progression-summary" class="progression-summary"></div>
+            ${this.renderTouchBuilderControls()}
+            <div id="editor-stats" class="stats-grid"></div>
+            <div id="crew-grid" class="crew-grid"></div>
+            <div class="toolbar-row">
+              <button data-action="rotate-left">Rotate ⟲</button>
+              <button data-action="rotate-right">Rotate ⟳</button>
+              <button data-action="clear">Clear</button>
+              <button data-action="reset-crew">Reset Crew</button>
+            </div>
+            <div class="toolbar-row">
+              <button data-action="load-example">Example</button>
+              <button data-action="export-json">Copy JSON</button>
+              <button data-action="import-json">Import JSON</button>
+            </div>
+          </div>
+        </details>
+
+        <!-- ── Mission ────────────────────────────────── -->
+        <details class="sidebar-group" open>
+          <summary class="sidebar-group-header"><span class="sidebar-group-icon">🎯</span> Mission</summary>
+          <div class="sidebar-group-body">
+            <div class="encounter-grid">
+              ${ENCOUNTER_PRESETS.map((preset) => `<button class="encounter-button" data-encounter="${preset.id}" title="${preset.description}">${preset.displayName}</button>`).join('')}
+              <button class="encounter-button" data-encounter="endless" title="Infinite procedurally-generated waves with escalating difficulty. Earn credits and push your limits." style="border-color:rgba(251,191,36,0.5);">∞ Endless Gauntlet</button>
+            </div>
+            <div id="encounter-briefing" class="muted"></div>
+          </div>
+        </details>
+
+        <!-- ── Loadout ────────────────────────────────── -->
+        <details class="sidebar-group" open>
+          <summary class="sidebar-group-header"><span class="sidebar-group-icon">⚙️</span> Loadout</summary>
+          <div class="sidebar-group-body">
+            <div id="prep-bay-summary" class="progression-summary"></div>
+            <div id="chronicle-grid" class="prep-grid"></div>
+            <div id="legacy-bonus-grid" class="prep-grid"></div>
+            <div id="mutagen-grid" class="prep-grid"></div>
+            <div id="lineage-grid" class="prep-grid"></div>
+            <div id="milestone-grid" class="prep-grid"></div>
+            <div class="toolbar-row">
+              <button data-action="clear-wingman">Clear Wingman</button>
+            </div>
+          </div>
+        </details>
+
+        <!-- ── Audio (closed by default) ──────────────── -->
+        <details class="sidebar-group">
+          <summary class="sidebar-group-header"><span class="sidebar-group-icon">🔊</span> Audio</summary>
+          <div class="sidebar-group-body">
+            <div id="audio-settings-grid" class="prep-grid"></div>
+          </div>
+        </details>
+
+        <!-- ── Salvage (closed by default) ────────────── -->
+        <details class="sidebar-group">
+          <summary class="sidebar-group-header"><span class="sidebar-group-icon">🧩</span> Salvage</summary>
+          <div class="sidebar-group-body">
+            <div id="salvage-grid" class="salvage-grid"></div>
+          </div>
+        </details>
+
+        <!-- ── Hangar (closed by default) ─────────────── -->
+        <details class="sidebar-group">
+          <summary class="sidebar-group-header"><span class="sidebar-group-icon">🏗️</span> Hangar</summary>
+          <div class="sidebar-group-body">
+            <div class="toolbar-row">
+              <button data-action="save-hangar">Save Ship</button>
+              <button data-action="export-career">Export Career</button>
+              <button data-action="import-career">Import Career</button>
+            </div>
+            <div class="muted">Back up or restore your ship, hangar, unlocks, chronicle, salvage, lineage, mutagen, and legacy progress.</div>
+            <div id="hangar-grid" class="hangar-grid"></div>
+          </div>
+        </details>
+
+        <!-- ── Modules ────────────────────────────────── -->
+        <details class="sidebar-group" open>
+          <summary class="sidebar-group-header"><span class="sidebar-group-icon">📦</span> Modules</summary>
+          <div class="sidebar-group-body">
+            <div class="module-grid">
+              ${this.renderStandardPaletteButtons()}
+            </div>
+            ${this.lineageLocker.modules.length > 0 ? `
+              <h3>Corrupted Locker</h3>
+              <div id="corrupted-module-grid" class="module-grid">${this.renderCorruptedPaletteButtons()}</div>
+            ` : ''}
+          </div>
+        </details>
+
+        <!-- ── Launch (always open) ───────────────────── -->
+        <div class="sidebar-launch-section">
+          <div id="editor-preview" class="muted"></div>
+          <div id="editor-validation" class="muted"></div>
+          <div class="toolbar-row">
+            <button class="primary" data-action="launch">Launch Flight Test</button>
+          </div>
         </div>
       </div>
       <div class="overlay bottom-right panel compact-panel">
