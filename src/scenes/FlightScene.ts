@@ -4416,7 +4416,7 @@ export class FlightScene {
           </div>
           <button class="primary" id="debrief-restart" style="width:100%;margin-top:4px;font-size:0.85em">↻ Restart</button>
         `;
-        document.getElementById('debrief-restart')?.addEventListener('click', () => {
+        this.uiRoot.querySelector('#debrief-restart')?.addEventListener('click', () => {
           this.spawnEncounter(cloneBlueprint(this.player.blueprint));
         });
       } else if (this.encounterOutcome !== 'continue') {
