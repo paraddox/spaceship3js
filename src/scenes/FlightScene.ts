@@ -5666,6 +5666,7 @@ export class FlightScene {
     // Stat mods are applied on-the-fly via effectiveStats — no need to bake into upgradeStats
     this.rebuildPlayerWithUpgrades();
     this.shopMutatorOptions = []; // Remove mutator option after picking
+    this.refreshHud(); // Rebuild shop UI so the card disappears and mutator count updates
   }
 
   /**
