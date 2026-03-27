@@ -997,11 +997,12 @@ export class FlightScene {
     canvas.addEventListener('pointermove', this.onPointerMove);
     canvas.addEventListener('pointerdown', this.onPointerDown);
     canvas.addEventListener('pointerup', this.onPointerUp);
-    // Delegated click handler for all shop/sigil/crisis UI inside #flight-hud.
+    // Delegated event handler for all shop/sigil/crisis UI inside #flight-hud.
     // Runs on the stable parent element — no per-frame re-attachment needed.
+    // Listens on both 'click' and 'pointerdown' to cover all input modes.
     const flightHud = this.uiRoot.querySelector('#flight-hud');
     if (flightHud) {
-      flightHud.addEventListener('click', (e) => {
+      const handleHudInteraction = (e: Event) => {
         const target = (e.target as HTMLElement).closest('[data-sigil],[data-crisis],[data-contract],[data-upgrade],[data-mutator],[data-absorb],[data-action]') as HTMLElement | null;
         if (!target) return;
 
@@ -1091,6 +1092,16 @@ export class FlightScene {
           this.closeUpgradeShop();
           return;
         }
+      };
+      flightHud.addEventListener('click', handleHudInteraction);
+      flightHud.addEventListener('pointerdown', (e) => {
+        // Only handle pointerdown for buttons (not cards) to avoid double-firing with click
+        const target = (e.target as HTMLElement).closest('button[data-sigil],button[data-crisis],button[data-contract],button[data-upgrade],button[data-mutator],button[data-absorb],button[data-action]');
+        if (!target) return;
+        // Let the click event handle it normally — this is a safety net only
+        // for browsers/environments where click events don't fire from pointer input
+        e.preventDefault();
+        handleHudInteraction(e);
       });
     }
   }

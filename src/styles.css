@@ -36,6 +36,7 @@ button { cursor: pointer; }
 .overlay {
   position: absolute;
   pointer-events: auto;
+  z-index: 50;
 }
 
 .progression-summary {
@@ -69,7 +70,7 @@ button { cursor: pointer; }
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
 }
 
-.compact-panel { width: min(340px, calc(100vw - 32px)); }
+.compact-panel { width: min(340px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; }
 .editor-panel {
   max-height: calc(100vh - 32px);
   overflow-y: auto;
