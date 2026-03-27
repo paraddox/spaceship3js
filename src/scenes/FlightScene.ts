@@ -682,6 +682,7 @@ export class FlightScene {
   private legacyState: LegacyState = { ...DEFAULT_LEGACY_STATE };
   private legacyFinalized = false;
   private chronicleSaved = false;
+  private debriefRendered = false;
   private legacyNewMilestones: typeof MILESTONES = [];
 
   // Blueprint Scavenging (salvage system)
@@ -1588,6 +1589,7 @@ export class FlightScene {
     this.encounterOutcome = 'continue';
     this.clearMobileInputs();
     this.chronicleSaved = false;
+    this.debriefRendered = false;
     this.waveDelay = 0;
     this.waveAnnouncement = 'Wave 1 engaged';
     this.hasGrantedReward = false;
@@ -2706,6 +2708,23 @@ export class FlightScene {
       if (owner.team === 'player' && orbitShieldActive(this.activeMutators)) {
         const baseRadius = 1.3 + (this.drones.indexOf(drone)) * 0.45;
         drone.state.orbitRadius = baseRadius * 0.6;
+      }
+
+      // Enemy drones: push away from the player so they don't get stuck under the ship.
+      // Drones should circle around the player, not overlap them.
+      if (owner.team === 'enemy' && this.player.alive) {
+        const dx = drone.state.x - this.player.position.x;
+        const dz = drone.state.z - this.player.position.z;
+        const dist = Math.hypot(dx, dz);
+        const minDist = this.player.radius * 1.5; // keep drones outside player radius
+        if (dist < minDist && dist > 0.001) {
+          const pushRatio = minDist / dist;
+          drone.state = {
+            ...drone.state,
+            x: this.player.position.x + dx * pushRatio,
+            z: this.player.position.z + dz * pushRatio,
+          };
+        }
       }
 
       if (!drone.state.active) {
@@ -4299,6 +4318,9 @@ export class FlightScene {
       if (this.encounterOutcome === 'continue' && !this.isEndlessMode) {
         debrief.innerHTML = '';
       } else if (this.isEndlessMode && (this.encounterOutcome === 'defeat' || !this.player.alive)) {
+        // Only build the debrief report once — refreshHud() runs every frame
+        // and would destroy the Restart button before the click can land
+        if (this.debriefRendered) return;
         // Finalize run stats
         const s: RunStats = {
           ...this.runStats,
@@ -4419,6 +4441,7 @@ export class FlightScene {
         this.uiRoot.querySelector('#debrief-restart')?.addEventListener('click', () => {
           this.spawnEncounter(cloneBlueprint(this.player.blueprint));
         });
+        this.debriefRendered = true;
       } else if (this.encounterOutcome !== 'continue') {
         const report = buildEncounterDebrief({
           encounterName: this.encounterId,
