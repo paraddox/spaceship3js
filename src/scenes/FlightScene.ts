@@ -818,7 +818,9 @@ export class FlightScene {
     // If shop is open, only render — don't update game state
     if (this.shopOpen) {
       this.clearMobileInputs();
-      this.refreshHud();
+      // Do NOT rebuild HUD every frame — that destroys DOM elements
+      // and prevents click events from landing. The HUD is already built
+      // from the call that set shopOpen=true or from refreshHud() below.
       this.renderer.render(this.scene, this.camera);
       return;
     }
@@ -1094,15 +1096,6 @@ export class FlightScene {
         }
       };
       flightHud.addEventListener('click', handleHudInteraction);
-      flightHud.addEventListener('pointerdown', (e) => {
-        // Only handle pointerdown for buttons (not cards) to avoid double-firing with click
-        const target = (e.target as HTMLElement).closest('button[data-sigil],button[data-crisis],button[data-contract],button[data-upgrade],button[data-mutator],button[data-absorb],button[data-action]');
-        if (!target) return;
-        // Let the click event handle it normally — this is a safety net only
-        // for browsers/environments where click events don't fire from pointer input
-        e.preventDefault();
-        handleHudInteraction(e);
-      });
     }
   }
 
@@ -1717,6 +1710,7 @@ export class FlightScene {
       this.sigilSelectionOpen = true;
       this.shopOpen = true; // pause the game like the shop does
       this.waveAnnouncement = 'Choose your Pilot Sigil — this defines your run identity.';
+      this.refreshHud();
     } else {
       this.spawnWave(1);
     }
@@ -3399,6 +3393,7 @@ export class FlightScene {
           if (isCrisisPending(this.crisisState)) {
             this.shopOpen = true;
             this.waveAnnouncement = `⚠ Crisis Event — Wave ${this.currentWave}`;
+            this.refreshHud();
             return;
           }
         }
@@ -5603,6 +5598,7 @@ export class FlightScene {
 
     this.shopOpen = true;
     this.waveAnnouncement = `Wave ${waveCleared} cleared! Choose an upgrade or skip.`;
+    this.refreshHud();
   }
 
   private getUpgradePurchaseCost(upgrade: UpgradeDef) {
