@@ -549,6 +549,10 @@ const PROJECTILE_POOL_SIZE = 96;
 const ARENA_RADIUS = 18;
 const MAX_WORLD_RADIUS = 40;
 const WAVE_RESPAWN_DELAY = 1.6;
+const SHIP_VISUAL_SCALE = 0.6;
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 2.0;
+const ZOOM_STEP = 0.1;
 const ESCORT_EXTRACTION_POINT = new THREE.Vector3(0, 0, -14);
 
 export class FlightScene {
@@ -684,6 +688,8 @@ export class FlightScene {
   private chronicleSaved = false;
   private debriefRendered = false;
   private legacyNewMilestones: typeof MILESTONES = [];
+  private zoomLevel = 1;
+  private lastAppliedZoom = 1;
 
   // Blueprint Scavenging (salvage system)
   private salvageCollection = { ...DEFAULT_SALVAGE_COLLECTION };
@@ -745,8 +751,18 @@ export class FlightScene {
   private readonly onKeyDown = (event: KeyboardEvent) => {
     resumeAudio();
     this.keys.add(event.code);
+    if (event.code === 'PageUp' || event.code === 'Equal' || event.code === 'NumpadAdd') {
+      this.zoomLevel = Math.round(THREE.MathUtils.clamp(this.zoomLevel + ZOOM_STEP, ZOOM_MIN, ZOOM_MAX) * 10) / 10;
+    } else if (event.code === 'PageDown' || event.code === 'Minus' || event.code === 'NumpadSubtract') {
+      this.zoomLevel = Math.round(THREE.MathUtils.clamp(this.zoomLevel - ZOOM_STEP, ZOOM_MIN, ZOOM_MAX) * 10) / 10;
+    }
   };
   private readonly onKeyUp = (event: KeyboardEvent) => this.keys.delete(event.code);
+  private readonly onWheel = (event: WheelEvent) => {
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
+    this.zoomLevel = Math.round(THREE.MathUtils.clamp(this.zoomLevel + delta, ZOOM_MIN, ZOOM_MAX) * 10) / 10;
+  };
   private readonly onPointerMove = (event: PointerEvent) => this.updateMouseWorld(event);
   private readonly onPointerDown = (event: PointerEvent) => {
     resumeAudio();
@@ -815,6 +831,13 @@ export class FlightScene {
 
   update(dt: number): void {
     this.elapsedEncounterSeconds += dt;
+
+    // Apply zoom changes without requiring a window resize
+    if (this.zoomLevel !== this.lastAppliedZoom) {
+      this.lastAppliedZoom = this.zoomLevel;
+      const canvas = this.renderer.domElement;
+      this.resize(canvas.clientWidth, canvas.clientHeight);
+    }
 
     // If shop is open, only render — don't update game state
     if (this.shopOpen) {
@@ -973,7 +996,7 @@ export class FlightScene {
 
   resize(width: number, height: number): void {
     const aspect = width / Math.max(height, 1);
-    const frustum = 28;
+    const frustum = 28 / this.zoomLevel;
     this.camera.left = (-frustum * aspect) / 2;
     this.camera.right = (frustum * aspect) / 2;
     this.camera.top = frustum / 2;
@@ -988,6 +1011,7 @@ export class FlightScene {
     canvas.removeEventListener('pointermove', this.onPointerMove);
     canvas.removeEventListener('pointerdown', this.onPointerDown);
     canvas.removeEventListener('pointerup', this.onPointerUp);
+    canvas.removeEventListener('wheel', this.onWheel);
     destroyMusicAudio();
     disposeCombatFeedback(this.combatFeedback, this.scene);
     this.uiRoot.innerHTML = '';
@@ -1000,6 +1024,7 @@ export class FlightScene {
     canvas.addEventListener('pointermove', this.onPointerMove);
     canvas.addEventListener('pointerdown', this.onPointerDown);
     canvas.addEventListener('pointerup', this.onPointerUp);
+    canvas.addEventListener('wheel', this.onWheel, { passive: false });
     // Delegated event handler for all shop/sigil/crisis UI inside #flight-hud.
     // Runs on the stable parent element — no per-frame re-attachment needed.
     // Listens on both 'click' and 'pointerdown' to cover all input modes.
@@ -1872,6 +1897,7 @@ export class FlightScene {
     protectedTarget = false,
   ): RuntimeShip {
     const group = buildShipGroup(blueprint, 1, team);
+    group.scale.setScalar(SHIP_VISUAL_SCALE);
     group.position.copy(position);
     group.rotation.y = rotation;
     this.scene.add(group);
